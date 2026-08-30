@@ -92,6 +92,76 @@ class SharedContractTests(unittest.TestCase):
         ):
             self.assertIn(f'"{reason}"', source)
 
+    def test_encoder_service_declares_required_pins_and_sampling_period(self):
+        header = (ROOT / "BalanceController/EncoderService.h").read_text(encoding="utf-8")
+        for token in (
+            "static constexpr uint8_t ENCA_PIN = 32;",
+            "static constexpr uint8_t ENCB_PIN = 33;",
+            "static constexpr uint32_t RPM_SAMPLE_MS = 100;",
+        ):
+            self.assertIn(token, header)
+
+    def test_encoder_service_uses_preferences_critical_sections_and_rising_interrupt(self):
+        source = (ROOT / "BalanceController/EncoderService.cpp").read_text(encoding="utf-8")
+        for token in (
+            'begin("encoder", false)',
+            'getUInt("ppr", 0)',
+            'putUInt("ppr",',
+            "portENTER_CRITICAL_ISR(&pulseMux_)",
+            "portEXIT_CRITICAL_ISR(&pulseMux_)",
+            "portENTER_CRITICAL(&pulseMux_)",
+            "portEXIT_CRITICAL(&pulseMux_)",
+            "attachInterrupt(digitalPinToInterrupt(ENCA_PIN), onEncoderA, RISING)",
+        ):
+            self.assertIn(token, source)
+
+    def test_encoder_service_uses_absolute_rpm_formula_and_calibration_bounds(self):
+        source = (ROOT / "BalanceController/EncoderService.cpp").read_text(encoding="utf-8")
+        for token in (
+            "abs(pulses)",
+            "60000.0f",
+            "static_cast<float>(elapsedMs) * static_cast<float>(pulsesPerRevolution_)",
+            "RPM_SAMPLE_MS",
+        ):
+            self.assertIn(token, source)
+        finish_body = source.split("CommandResult EncoderService::finishCalibration()", 1)[1].split(
+            "uint32_t EncoderService::pulsesPerRevolution()", 1
+        )[0]
+        self.assertIn("calibrationPulses < 1", finish_body)
+        self.assertIn("calibrationPulses > 100000", finish_body)
+        self.assertNotIn("calibrationPulses_ <", finish_body)
+        self.assertNotIn("calibrationPulses_ >", finish_body)
+
+    def test_encoder_service_rebases_after_saved_calibration_and_checks_persistence(self):
+        source = (ROOT / "BalanceController/EncoderService.cpp").read_text(encoding="utf-8")
+        finish_body = source.split("CommandResult EncoderService::finishCalibration()", 1)[1].split(
+            "uint32_t EncoderService::pulsesPerRevolution()", 1
+        )[0]
+        for token in (
+            'if (!preferences_.begin("encoder", false))',
+            'preferences_.putUInt("ppr", calibrationPulses)',
+            "if (bytesWritten == 0)",
+            "lastPulseCount_ = pulseCount_",
+            "lastSampleMs_ = millis()",
+            "rpm_ = 0.0f",
+            '"persistence_failed"',
+        ):
+            self.assertIn(token, finish_body)
+        self.assertLess(finish_body.index("lastPulseCount_ = pulseCount_"), finish_body.index("if (calibrationPulses < 1"))
+        self.assertLess(finish_body.index("lastSampleMs_ = millis()"), finish_body.index("if (calibrationPulses < 1"))
+
+    def test_encoder_service_has_all_calibration_result_reasons(self):
+        source = (ROOT / "BalanceController/EncoderService.cpp").read_text(encoding="utf-8")
+        for reason in (
+            "calibration_started",
+            "already_calibrating",
+            "not_calibrating",
+            "invalid_pulse_count",
+            "calibration_saved",
+            "persistence_failed",
+        ):
+            self.assertIn(f'"{reason}"', source)
+
     def test_repository_text_excludes_local_paths_and_receiver_mac(self):
         result = subprocess.run(
             ["git", "ls-files", "-z"],

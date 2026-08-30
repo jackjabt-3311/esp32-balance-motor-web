@@ -72,6 +72,164 @@ class StateModelSmokeTests(unittest.TestCase):
         self.assertTrue(True)
 
 
+class EncoderReference:
+    """Reference model for encoder sampling and one-revolution calibration."""
+
+    RPM_SAMPLE_MS = 100
+    MIN_PPR = 1
+    MAX_PPR = 100000
+
+    def __init__(self, ppr=0):
+        self.ppr = ppr
+        self.calibrating = False
+        self.calibration_edges = 0
+        self.last_sample_ms = 0
+        self.last_pulse_count = 0
+        self.current_rpm = 0.0
+        self.pulse_count = 0
+        self.finish_time_ms = 0
+        self.persistence_succeeds = True
+
+    def tick(self, now_ms, pulse_count):
+        elapsed_ms = (now_ms - self.last_sample_ms) & UINT32_MASK
+        if elapsed_ms == 0 or self.ppr == 0:
+            self.current_rpm = 0.0
+            return self.current_rpm
+        if elapsed_ms < self.RPM_SAMPLE_MS:
+            return self.current_rpm
+
+        pulse_delta = pulse_count - self.last_pulse_count
+        self.last_sample_ms = now_ms
+        self.last_pulse_count = pulse_count
+        self.current_rpm = abs(pulse_delta) * 60000.0 / (elapsed_ms * self.ppr)
+        return self.current_rpm
+
+    def start_calibration(self):
+        if self.calibrating:
+            return False, "already_calibrating"
+        self.calibrating = True
+        self.calibration_edges = 0
+        return True, "calibration_started"
+
+    def add_calibration_edge(self):
+        if self.calibrating:
+            self.calibration_edges += 1
+
+    def finish_calibration(self):
+        if not self.calibrating:
+            return False, "not_calibrating"
+        self.calibrating = False
+        self.last_sample_ms = self.finish_time_ms
+        self.last_pulse_count = self.pulse_count
+        self.current_rpm = 0.0
+        if not self.MIN_PPR <= self.calibration_edges <= self.MAX_PPR:
+            return False, "invalid_pulse_count"
+        if not self.persistence_succeeds:
+            return False, "persistence_failed"
+        self.ppr = self.calibration_edges
+        return True, "calibration_saved"
+
+
+class EncoderReferenceTests(unittest.TestCase):
+    def test_100_edges_over_1000ms_at_100_ppr_is_60_rpm(self):
+        encoder = EncoderReference(ppr=100)
+        self.assertEqual(encoder.tick(1000, 100), 60.0)
+
+    def test_zero_elapsed_or_zero_ppr_returns_zero_rpm(self):
+        uncalibrated = EncoderReference(ppr=0)
+        uncalibrated.current_rpm = 12.0
+        self.assertEqual(uncalibrated.tick(99, 20), 0.0)
+        encoder = EncoderReference(ppr=100)
+        encoder.last_sample_ms = 100
+        encoder.last_pulse_count = 20
+        encoder.current_rpm = 12.0
+        self.assertEqual(encoder.tick(100, 40), 0.0)
+
+    def test_negative_edge_delta_uses_absolute_value(self):
+        encoder = EncoderReference(ppr=100)
+        encoder.last_pulse_count = 100
+        self.assertEqual(encoder.tick(1000, 0), 60.0)
+
+    def test_rpm_updates_no_faster_than_100ms(self):
+        encoder = EncoderReference(ppr=100)
+        self.assertEqual(encoder.tick(99, 100), 0.0)
+        self.assertEqual(encoder.tick(100, 100), 600.0)
+
+    def test_calibration_rejects_zero_and_100001_edges(self):
+        for count in (0, 100001):
+            encoder = EncoderReference(ppr=120)
+            encoder.start_calibration()
+            encoder.calibration_edges = count
+            self.assertEqual(encoder.finish_calibration(), (False, "invalid_pulse_count"))
+
+    def test_calibration_accepts_one_and_100000_edges(self):
+        for count in (1, 100000):
+            encoder = EncoderReference()
+            encoder.start_calibration()
+            encoder.calibration_edges = count
+            self.assertEqual(encoder.finish_calibration(), (True, "calibration_saved"))
+            self.assertEqual(encoder.ppr, count)
+
+    def test_failed_calibration_preserves_existing_valid_ppr(self):
+        encoder = EncoderReference(ppr=120)
+        encoder.start_calibration()
+        self.assertEqual(encoder.finish_calibration(), (False, "invalid_pulse_count"))
+        self.assertEqual(encoder.ppr, 120)
+
+    def test_successful_calibration_rebases_first_operational_rpm_sample(self):
+        encoder = EncoderReference(ppr=120)
+        encoder.last_sample_ms = 1000
+        encoder.last_pulse_count = 50
+        encoder.current_rpm = 42.0
+        encoder.finish_time_ms = 5000
+        encoder.pulse_count = 900
+        encoder.start_calibration()
+        encoder.calibration_edges = 100
+
+        self.assertEqual(encoder.finish_calibration(), (True, "calibration_saved"))
+        self.assertEqual((encoder.last_sample_ms, encoder.last_pulse_count, encoder.current_rpm), (5000, 900, 0.0))
+        self.assertEqual(encoder.tick(5100, 920), 120.0)
+
+    def test_persistence_failure_preserves_existing_valid_ppr(self):
+        encoder = EncoderReference(ppr=120)
+        encoder.persistence_succeeds = False
+        encoder.start_calibration()
+        encoder.calibration_edges = 100
+
+        self.assertEqual(encoder.finish_calibration(), (False, "persistence_failed"))
+        self.assertEqual(encoder.ppr, 120)
+
+    def test_invalid_calibration_rebases_rpm_without_changing_existing_ppr(self):
+        encoder = EncoderReference(ppr=120)
+        encoder.last_sample_ms = 1000
+        encoder.last_pulse_count = 50
+        encoder.current_rpm = 42.0
+        encoder.finish_time_ms = 5000
+        encoder.pulse_count = 900
+        encoder.start_calibration()
+
+        self.assertEqual(encoder.finish_calibration(), (False, "invalid_pulse_count"))
+        self.assertEqual(encoder.ppr, 120)
+        self.assertEqual((encoder.last_sample_ms, encoder.last_pulse_count, encoder.current_rpm), (5000, 900, 0.0))
+        self.assertEqual(encoder.tick(5100, 920), 100.0)
+
+    def test_persistence_failure_rebases_rpm_without_changing_existing_ppr(self):
+        encoder = EncoderReference(ppr=120)
+        encoder.persistence_succeeds = False
+        encoder.last_sample_ms = 1000
+        encoder.last_pulse_count = 50
+        encoder.current_rpm = 42.0
+        encoder.finish_time_ms = 5000
+        encoder.pulse_count = 900
+        encoder.start_calibration()
+        encoder.calibration_edges = 100
+
+        self.assertEqual(encoder.finish_calibration(), (False, "persistence_failed"))
+        self.assertEqual(encoder.ppr, 120)
+        self.assertEqual((encoder.last_sample_ms, encoder.last_pulse_count, encoder.current_rpm), (5000, 900, 0.0))
+        self.assertEqual(encoder.tick(5100, 920), 100.0)
+
+
 class SafetyGateReferenceTests(unittest.TestCase):
     def test_no_helmet_packet_locks_for_lost_signal(self):
         gate = SafetyGateReference()
