@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+import re
 import subprocess
 import unittest
 
@@ -56,6 +57,41 @@ class SharedContractTests(unittest.TestCase):
         for state_name in ("locked", "ready", "armed", "running", "ramping_down", "fault", "estop"):
             self.assertIn(f'"{state_name}"', source)
 
+    def test_safety_gate_declares_required_public_interface(self):
+        header = (ROOT / "BalanceController/SafetyGate.h").read_text(encoding="utf-8")
+        for field in (
+            r"bool\s+helmetWorn\s*;",
+            r"bool\s+helmetFresh\s*;",
+            r"bool\s+onePersonStable\s*;",
+            r"bool\s+encoderCalibrated\s*;",
+            r"bool\s+motorFault\s*;",
+            r"bool\s+ready\s*;",
+            r"const\s+char\*\s+lockReason\s*;",
+        ):
+            self.assertRegex(header, field)
+        for signature in (
+            r"struct\s+SafetySnapshot\s*\{",
+            r"void\s+noteHelmet\s*\(\s*bool\s+worn\s*,\s*uint32_t\s+nowMs\s*\)",
+            r"void\s+updatePeople\s*\(\s*int\s+people\s*,\s*uint32_t\s+nowMs\s*\)",
+            r"SafetySnapshot\s+evaluate\s*\(\s*uint32_t\s+nowMs\s*,\s*bool\s+encoderCalibrated\s*,\s*bool\s+motorFault\s*\)\s*const",
+        ):
+            self.assertRegex(header, signature)
+
+    def test_safety_gate_uses_shared_time_constants_and_all_lock_reasons(self):
+        source = (ROOT / "BalanceController/SafetyGate.cpp").read_text(encoding="utf-8")
+        self.assertIn("HELMET_TIMEOUT_MS", source)
+        self.assertIn("PEOPLE_STABLE_MS", source)
+        for reason in (
+            "helmet_signal_lost",
+            "helmet_not_worn",
+            "people_not_one",
+            "people_not_stable",
+            "encoder_not_calibrated",
+            "motor_fault",
+            "ready",
+        ):
+            self.assertIn(f'"{reason}"', source)
+
     def test_repository_text_excludes_local_paths_and_receiver_mac(self):
         result = subprocess.run(
             ["git", "ls-files", "-z"],
@@ -91,4 +127,3 @@ class SharedContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

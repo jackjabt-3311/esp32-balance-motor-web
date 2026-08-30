@@ -543,4 +543,3 @@ Check every spec section 1–15 against a file or test. Confirm `model.c` hash m
 - [ ] **Step 6: Package verified sources**
 
 Copy the complete `BalanceController`, `HelmetTransmitter`, tests, README, design spec, implementation plan, and verification log to `outputs/esp32-balance-controller/`. Re-run tests against the packaged copy and report software-verified versus hardware-unverified results separately.
-

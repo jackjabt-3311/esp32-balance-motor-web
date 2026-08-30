@@ -233,4 +233,3 @@ Compilation cannot prove motor direction, encoder scaling, PID stability, or saf
 - Maximum target 300 RPM.
 - No automatic restart after any stop, ramp-down, fault, reset, or recovered prerequisite.
 - HTML updates can change presentation and requests but cannot alter firmware safety logic.
-

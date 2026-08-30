@@ -16,4 +16,3 @@ struct CommandResult {
 };
 
 const char* motorStateName(MotorState state);
-

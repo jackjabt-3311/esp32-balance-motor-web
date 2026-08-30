@@ -1690,4 +1690,3 @@ void score(double * input, double * output) {
     mul_vector_number(var1, 0.06666666666666667, 3, var0);
     memcpy(output, var0, 3 * sizeof(double));
 }
-

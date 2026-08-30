@@ -12,4 +12,3 @@ const char* motorStateName(MotorState state) {
   }
   return "fault";
 }
-
