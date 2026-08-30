@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_MODEL_SHA256 = "f6e136bd80e5003a7465616237539f3f37d3affbc3b7192fce4df2dd0182dd54"
 FORBIDDEN_LOCAL_PATH = "C:" + chr(92) + "Users" + chr(92)
-FORBIDDEN_RECEIVER_MAC = "04" + ":B2:47:54:D1:FC"
+FORBIDDEN_RECEIVER_MAC_SHA256 = "941ca46c54571bf98fc0a13f11fcc2b948ccb447cb094c39554bd18cc38474a9"
 
 PLANNED_FILES = (
     "BalanceController/ControlTypes.h",
@@ -183,7 +183,13 @@ class SharedContractTests(unittest.TestCase):
             except UnicodeDecodeError:
                 continue
             scanned_paths.add(relative_path.as_posix())
-            if FORBIDDEN_LOCAL_PATH in text or FORBIDDEN_RECEIVER_MAC in text:
+            mac_candidates = re.findall(r"(?i)(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}", text)
+            contains_receiver_mac = any(
+                hashlib.sha256(candidate.replace("-", ":").lower().encode("ascii")).hexdigest()
+                == FORBIDDEN_RECEIVER_MAC_SHA256
+                for candidate in mac_candidates
+            )
+            if FORBIDDEN_LOCAL_PATH in text or contains_receiver_mac:
                 violations.append(relative_path.as_posix())
         self.assertIn(".gitignore", scanned_paths)
         self.assertEqual(violations, [])
