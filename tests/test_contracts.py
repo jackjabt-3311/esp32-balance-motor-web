@@ -37,6 +37,60 @@ FUTURE_ROUTES = (
 )
 
 
+class UploadLifecycleReference:
+    """Executable request lifecycle for the recoverable upload boundary."""
+
+    def __init__(self):
+        self.active = "old-page"
+        self.backup = None
+        self.temp = None
+        self.started = False
+        self.ended = False
+        self.failed = False
+        self.reason = "upload_incomplete"
+        self.upload_reads = 0
+
+    @staticmethod
+    def is_multipart(content_type):
+        if content_type is None:
+            return False
+        media_type = content_type.split(";", 1)[0].strip()
+        return media_type.startswith("multipart/") and media_type == "multipart/form-data"
+
+    def start_file(self, content_type):
+        if not self.is_multipart(content_type):
+            self.failed, self.reason = True, "invalid_upload_content_type"
+            return
+        self.upload_reads += 1
+        if self.started:
+            self.failed, self.reason, self.temp = True, "multiple_files", None
+            return
+        self.started, self.temp = True, "new-page"
+
+    def end_file(self):
+        if not self.failed and self.started:
+            self.ended = True
+
+    def abort(self):
+        self.temp = None
+        self.started = self.ended = self.failed = False
+        self.reason = "upload_incomplete"
+
+    def finalize(self, content_type):
+        if not self.is_multipart(content_type):
+            self.failed, self.reason = True, "invalid_upload_content_type"
+        if not self.failed and self.started and self.ended:
+            self.backup, self.active, self.temp = self.active, self.temp, None
+            self.backup = None
+            status, reason = 200, "upload_promoted"
+        else:
+            self.temp = None
+            status, reason = 400, self.reason
+        self.started = self.ended = self.failed = False
+        self.reason = "upload_incomplete"
+        return status, reason
+
+
 class SharedContractTests(unittest.TestCase):
     def test_all_planned_files_exist(self):
         missing = [path for path in PLANNED_FILES if not (ROOT / path).is_file()]
@@ -397,6 +451,264 @@ class SharedContractTests(unittest.TestCase):
         self.assertIn("HelmetTransmitter/LocalConfig.h", ignored)
         self.assertNotIn(FORBIDDEN_LOCAL_PATH_PREFIX, example.lower())
         self.assertIn("WIFI_CHANNEL = 1", receiver)
+
+    def test_web_interface_declares_callback_adapters_and_exact_snapshot_fields(self):
+        header = (ROOT / "BalanceController/WebInterface.h").read_text(encoding="utf-8")
+        for field in (
+            "float lc1", "float lc2", "float lc3", "float lc4", "float x", "float y",
+            "int people", "const char* helmet", "bool motorAllowed", "const char* lockReason",
+            "const char* motorState", "uint16_t targetRpm", "float actualRpm",
+            "float pwmPercent", "bool encoderCalibrated", "uint32_t pulsesPerRev",
+            "const char* fault",
+        ):
+            self.assertIn(field, header)
+        for token in (
+            "SnapshotCopyCallback", "MotorCommandCallback", "RpmCommandCallback",
+            "CalibrationCommandCallback", "PulsesPerRevCallback", "WebCallbacks",
+            "void begin()", "void handleClient()",
+        ):
+            self.assertIn(token, header)
+
+    def test_web_interface_registers_every_exact_route_with_post_mutations(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        for route in ("/", "/data"):
+            self.assertRegex(source, rf'server_\.on\(\s*"{re.escape(route)}"\s*,\s*HTTP_GET')
+        for route in FUTURE_ROUTES[1:]:
+            self.assertRegex(source, rf'server_\.on\(\s*"{re.escape(route)}"\s*,\s*HTTP_POST')
+
+    def test_web_data_json_uses_one_snapshot_copy_and_all_contract_keys(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        marker = "void WebInterface::handleData()"
+        self.assertIn(marker, source)
+        data_body = source.split(marker, 1)[1].split(
+            "void WebInterface::handleRoot()", 1
+        )[0]
+        self.assertEqual(data_body.count("callbacks_.copySnapshot(snapshot)"), 1)
+        for key in (
+            "lc1", "lc2", "lc3", "lc4", "x", "y", "people", "helmet",
+            "motorAllowed", "lockReason", "motorState", "targetRpm", "actualRpm",
+            "pwmPercent", "encoderCalibrated", "pulsesPerRev", "fault",
+        ):
+            self.assertIn(f'\\"{key}\\"', data_body)
+        self.assertIn("jsonEscape", data_body)
+
+    def test_web_command_result_mapping_and_strict_rpm_validation_are_explicit(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        marker = "void WebInterface::handleMotorRpm()"
+        self.assertIn(marker, source)
+        rpm_body = source.split(marker, 1)[1].split(
+            "void WebInterface::handleCalibrationStart()", 1
+        )[0]
+        for token in (
+            'server_.hasArg("value")', "value.length() == 0", "isStrictRpm",
+            "HTTP_BAD_REQUEST", "callbacks_.motorRpm",
+        ):
+            self.assertIn(token, rpm_body)
+        strict_parser = source.split("bool WebInterface::isStrictRpm", 1)[1].split(
+            "bool WebInterface::isHtmlFilename", 1
+        )[0]
+        self.assertIn("MAX_TARGET_RPM", strict_parser)
+        self.assertIn("character < '0' || character > '9'", strict_parser)
+        self.assertIn("HTTP_OK", source)
+        self.assertIn("HTTP_CONFLICT", source)
+        self.assertIn('\\"ok\\"', source)
+        self.assertIn('\\"reason\\"', source)
+
+    def test_web_calibration_gates_on_stopped_snapshot_and_returns_saved_ppr(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        for name, callback in (
+            ("handleCalibrationStart", "calibrationStart"),
+            ("handleCalibrationFinish", "calibrationFinish"),
+        ):
+            marker = f"void WebInterface::{name}()"
+            self.assertIn(marker, source)
+            body = source.split(marker, 1)[1]
+            self.assertIn("copySnapshot", body)
+            self.assertIn("isMotorFullyStopped", body)
+            self.assertIn(callback, body)
+        finish_marker = "void WebInterface::handleCalibrationFinish()"
+        finish_body = source.split(finish_marker, 1)[1].split(
+            "void WebInterface::handleUploadComplete()", 1
+        )[0]
+        self.assertIn("pulsesPerRev", finish_body)
+        self.assertIn("savedPulsesPerRev", finish_body)
+
+    def test_web_mounts_without_format_and_serves_utf8_recovery_upload_form(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        self.assertIn("LittleFS.begin(false)", source)
+        self.assertNotIn("LittleFS.begin(true)", source)
+        self.assertIn('"text/html; charset=utf-8"', source)
+        self.assertIn('action="/upload"', source)
+        self.assertIn('enctype="multipart/form-data"', source)
+        self.assertIn('accept=".html"', source)
+        handle_body = source.split("void WebInterface::handleClient()", 1)[1]
+        self.assertIn("server_.handleClient()", handle_body)
+        self.assertNotIn("delay(", handle_body)
+
+    def test_web_upload_uses_bounded_temp_transaction_and_short_write_checks(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "BalanceController/WebInterface.h").read_text(encoding="utf-8")
+        self.assertIn("262144", source + header)
+        self.assertIn('"/index.tmp"', source)
+        self.assertIn('"/index.html"', source)
+        self.assertIn('"/index.bak"', source)
+        self.assertIn("MAX_UPLOAD_BYTES - uploadBytes_", source)
+        self.assertIn("written != upload.currentSize", source)
+        self.assertIn("toLowerCase", source)
+        self.assertIn('endsWith(".html")', source)
+        self.assertIn("UPLOAD_FILE_START", source)
+        self.assertIn("UPLOAD_FILE_WRITE", source)
+        self.assertIn("UPLOAD_FILE_END", source)
+        self.assertIn("UPLOAD_FILE_ABORTED", source)
+
+    def test_web_upload_promotes_with_backup_restore_and_temp_only_error_cleanup(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        promote_marker = "bool WebInterface::promoteUpload()"
+        self.assertIn(promote_marker, source)
+        promote_body = source.split(promote_marker, 1)[1].split(
+            "bool WebInterface::isStrictRpm", 1
+        )[0]
+        self.assertLess(promote_body.index('LittleFS.remove("/index.bak")'),
+                        promote_body.index('LittleFS.rename("/index.html", "/index.bak")'))
+        self.assertLess(promote_body.index('LittleFS.rename("/index.html", "/index.bak")'),
+                        promote_body.index('LittleFS.rename("/index.tmp", "/index.html")'))
+        self.assertIn('LittleFS.rename("/index.bak", "/index.html")', promote_body)
+        self.assertLess(promote_body.index('LittleFS.rename("/index.tmp", "/index.html")'),
+                        promote_body.rindex('LittleFS.remove("/index.bak")'))
+        cleanup_marker = "void WebInterface::cleanupUploadTemp()"
+        self.assertIn(cleanup_marker, source)
+        cleanup_body = source.split(cleanup_marker, 1)[1].split(
+            "bool WebInterface::promoteUpload()", 1
+        )[0]
+        self.assertIn('LittleFS.remove("/index.tmp")', cleanup_body)
+        self.assertNotIn('LittleFS.remove("/index.html")', cleanup_body)
+        self.assertNotIn('LittleFS.remove("/index.bak")', cleanup_body)
+
+    def test_web_upload_rejects_raw_plain_and_json_before_reading_upload_state(self):
+        for content_type in (None, "text/plain", "application/json", "Multipart/Form-Data; boundary=abc"):
+            lifecycle = UploadLifecycleReference()
+            self.assertEqual(lifecycle.finalize(content_type), (400, "invalid_upload_content_type"))
+            self.assertEqual(lifecycle.upload_reads, 0)
+            self.assertEqual(lifecycle.active, "old-page")
+
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        begin_body = source.split("void WebInterface::begin()", 1)[1].split(
+            "void WebInterface::handleClient()", 1
+        )[0]
+        self.assertIn("collectHeaders", begin_body)
+        upload_body = source.split("void WebInterface::handleUploadData()", 1)[1].split(
+            "void WebInterface::sendCommandResult", 1
+        )[0]
+        self.assertIn("isMultipartUploadRequest", upload_body)
+        self.assertLess(upload_body.index("isMultipartUploadRequest"),
+                        upload_body.index("server_.upload()"))
+        multipart_guard = source.split("bool WebInterface::isMultipartUploadRequest", 1)[1].split(
+            "bool WebInterface::isMotorFullyStopped", 1
+        )[0]
+        self.assertIn('startsWith("multipart/")', multipart_guard)
+        self.assertIn('== "multipart/form-data"', multipart_guard)
+        self.assertNotIn("equalsIgnoreCase", multipart_guard)
+
+    def test_web_upload_defers_promotion_until_final_and_rejects_post_end_abort_or_second_file(self):
+        successful = UploadLifecycleReference()
+        successful.start_file("multipart/form-data; boundary=abc")
+        successful.end_file()
+        self.assertEqual((successful.active, successful.temp), ("old-page", "new-page"))
+        self.assertEqual(successful.finalize("multipart/form-data; boundary=abc"), (200, "upload_promoted"))
+        self.assertEqual(successful.active, "new-page")
+
+        second_file = UploadLifecycleReference()
+        second_file.start_file("multipart/form-data; boundary=abc")
+        second_file.end_file()
+        second_file.start_file("multipart/form-data; boundary=abc")
+        self.assertEqual(second_file.finalize("multipart/form-data; boundary=abc")[0], 400)
+        self.assertEqual((second_file.active, second_file.temp), ("old-page", None))
+
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        end_body = source.split("case UPLOAD_FILE_END:", 1)[1].split(
+            "case UPLOAD_FILE_ABORTED:", 1
+        )[0]
+        self.assertIn("uploadFileEnded_ = true", end_body)
+        self.assertNotIn("promoteUpload", end_body)
+        final_body = source.split("void WebInterface::handleUploadComplete()", 1)[1].split(
+            "void WebInterface::handleUploadData()", 1
+        )[0]
+        self.assertIn("promoteUpload", final_body)
+        self.assertIn("uploadStarted_ && uploadFileEnded_", final_body)
+
+    def test_web_upload_abort_resets_without_final_response_then_allows_fresh_upload(self):
+        lifecycle = UploadLifecycleReference()
+        lifecycle.start_file("multipart/form-data; boundary=abc")
+        lifecycle.end_file()
+        lifecycle.abort()
+        self.assertEqual((lifecycle.active, lifecycle.temp), ("old-page", None))
+
+        lifecycle.start_file("multipart/form-data; boundary=def")
+        lifecycle.end_file()
+        self.assertEqual(lifecycle.finalize("multipart/form-data; boundary=def"),
+                         (200, "upload_promoted"))
+        self.assertEqual(lifecycle.active, "new-page")
+
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        abort_body = source.split("case UPLOAD_FILE_ABORTED:", 1)[1].split(
+            "default:", 1
+        )[0]
+        self.assertIn("resetUploadRequest()", abort_body)
+        self.assertLess(abort_body.index("failUpload(\"upload_aborted\")"),
+                        abort_body.index("resetUploadRequest()"))
+
+    def test_webserver_v2_header_types_and_nonconst_access_contract(self):
+        header = (ROOT / "BalanceController/WebInterface.h").read_text(encoding="utf-8")
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        self.assertIn("bool isMultipartUploadRequest();", header)
+        self.assertNotIn("bool isMultipartUploadRequest() const;", header)
+        self.assertIn("const char* REQUEST_HEADERS[]", source)
+        self.assertNotIn("const char* const REQUEST_HEADERS[]", source)
+        self.assertIn("server_.collectHeaders(REQUEST_HEADERS, 1)", source)
+
+    def test_web_upload_final_response_resets_lifecycle_before_consecutive_no_file_post(self):
+        lifecycle = UploadLifecycleReference()
+        lifecycle.start_file("multipart/form-data; boundary=abc")
+        lifecycle.end_file()
+        self.assertEqual(lifecycle.finalize("multipart/form-data; boundary=abc")[0], 200)
+        self.assertEqual(lifecycle.finalize("multipart/form-data; boundary=abc"),
+                         (400, "upload_incomplete"))
+
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        final_body = source.split("void WebInterface::handleUploadComplete()", 1)[1].split(
+            "void WebInterface::handleUploadData()", 1
+        )[0]
+        self.assertIn("resetUploadRequest", final_body)
+        reset_body = source.split("void WebInterface::resetUploadRequest()", 1)[1].split(
+            "bool WebInterface::promoteUpload()", 1
+        )[0]
+        for token in ("uploadBytes_ = 0", "uploadStarted_ = false", "uploadFileEnded_ = false",
+                      "uploadFailed_ = false", 'uploadFailureReason_ = "upload_incomplete"'):
+            self.assertIn(token, reset_body)
+
+    def test_web_upload_reports_rollback_failure_without_deleting_backup(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        promote_body = source.split("bool WebInterface::promoteUpload()", 1)[1].split(
+            "bool WebInterface::isStrictRpm", 1
+        )[0]
+        rollback = 'LittleFS.rename("/index.bak", "/index.html")'
+        self.assertIn(rollback, promote_body)
+        self.assertIn(f"if (!{rollback})", promote_body)
+        self.assertIn('uploadFailureReason_ = "rollback_failed"', promote_body)
+
+    def test_web_snapshot_handlers_reject_missing_copy_callback_without_dereference(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        for handler, boundary in (
+            ("handleData", "void WebInterface::handleRoot()"),
+            ("handleCalibrationStart", "void WebInterface::handleCalibrationFinish()"),
+            ("handleCalibrationFinish", "void WebInterface::handleUploadComplete()"),
+        ):
+            marker = f"void WebInterface::{handler}()"
+            body = source.split(marker, 1)[1].split(boundary, 1)[0]
+            self.assertIn("callbacks_.copySnapshot == nullptr", body)
+            self.assertLess(body.index("callbacks_.copySnapshot == nullptr"),
+                            body.index("callbacks_.copySnapshot(snapshot)"))
+            self.assertIn("not_configured", body)
 
     @unittest.expectedFailure
     def test_future_api_and_html_contract_lists_all_routes(self):
