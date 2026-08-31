@@ -710,11 +710,48 @@ class SharedContractTests(unittest.TestCase):
                             body.index("callbacks_.copySnapshot(snapshot)"))
             self.assertIn("not_configured", body)
 
-    @unittest.expectedFailure
-    def test_future_api_and_html_contract_lists_all_routes(self):
+    def test_dashboard_html_contract_is_offline_safe_and_controls_firmware_api(self):
         html = (ROOT / "BalanceController/data/index.html").read_text(encoding="utf-8")
+
+        # Removing any of these IDs breaks a real status/control boundary.
+        for element_id in (
+            "helmetStatus", "peopleCount", "motorAllowed", "lockReason",
+            "lc1", "lc2", "lc3", "lc4", "dot", "motorToggle", "rpmSlider",
+            "targetRpm", "actualRpm", "motorState", "estopButton", "faultReset",
+            "calibrationStart", "calibrationFinish", "htmlUpload", "commandMessage",
+        ):
+            self.assertRegex(html, rf'id=["\']{element_id}["\']')
         for route in FUTURE_ROUTES:
             self.assertIn(route, html)
+
+        # The dashboard must send commands to the firmware rather than deriving authority.
+        self.assertRegex(html, r'fetch\("/data"\s*(?:,|\))')
+        self.assertRegex(html, r"setTimeout\s*\(\s*pollData\s*,\s*100\s*\)")
+        self.assertRegex(html, r'motorAllowed\s*===\s*true\s*&&\s*state\s*===\s*["\']ready["\']')
+        self.assertRegex(html, r'["\']armed["\']\s*\|\|\s*state\s*===\s*["\']running["\']')
+        self.assertRegex(html, r'id=["\']rpmSlider["\'][^>]*min=["\']0["\'][^>]*max=["\']300["\'][^>]*step=["\']1["\']')
+        self.assertIn("FormData", html)
+        self.assertIn('form.append("file"', html)
+        self.assertIn("window.location.replace(\"/\")", html)
+        self.assertIn("response.ok && body.ok === true", html)
+        self.assertIn("수집 중", html)
+        self.assertIn("출력축/바퀴를 정확히 한 바퀴", html)
+        self.assertIn("commandMessage", html)
+        self.assertRegex(html, r'id=["\']faultReset["\'][^>]*\bdisabled\b')
+        self.assertRegex(html, r'id=["\']calibrationStart["\'][^>]*\bdisabled\b')
+        self.assertRegex(html, r'id=["\']calibrationFinish["\'][^>]*\bdisabled\b')
+        self.assertRegex(html, r'<label[^>]+for=["\']htmlUpload["\']')
+        self.assertIn("AbortController", html)
+        self.assertIn("DATA_TIMEOUT_MS", html)
+        self.assertIn("controller.abort()", html)
+        self.assertIn("signal: controller.signal", html)
+        self.assertIn("renderFailSafe", html)
+        self.assertIn("setNormalControlsDisabled(true)", html)
+        self.assertIn('refreshData({ force: true, reconcileRpm: endpoint === "/motor/rpm" })', html)
+        self.assertIn("dataGeneration", html)
+        self.assertIn("rpmInteracting", html)
+        self.assertNotRegex(html, r"https?://|//[a-zA-Z0-9._-]+")
+        self.assertNotRegex(html, r"<script[^>]+\bsrc=|<link[^>]+\bhref=|\bimport\s*(?:\(|[^a-zA-Z])")
 
 
 if __name__ == "__main__":

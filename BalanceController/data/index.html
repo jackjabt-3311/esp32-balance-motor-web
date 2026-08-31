@@ -1,1 +1,135 @@
-<!-- Task 4 placeholder -->
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>균형 제어 대시보드</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10151c; color: #edf4f8; }
+    * { box-sizing: border-box; } body { margin: 0; padding: 16px; }
+    main { max-width: 900px; margin: auto; display: grid; gap: 16px; } h1, h2, p { margin: 0; }
+    h1 { font-size: 1.45rem; } h2 { font-size: 1.05rem; }
+    .panel, .card { background: #1b2530; border: 1px solid #334557; border-radius: 12px; padding: 16px; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .card { padding: 12px; }
+    .label { color: #aabdc9; display: block; font-size: .82rem; margin-bottom: 5px; }
+    .value { font-size: 1.12rem; font-weight: 700; overflow-wrap: anywhere; }
+    .board { position: relative; display: grid; grid-template-columns: 1fr 1fr; aspect-ratio: 1; margin-top: 12px; border: 2px solid #628096; border-radius: 10px; overflow: hidden; }
+    .quadrant { min-height: 90px; padding: 12px; border: 1px solid #40586b; background: #17212b; }
+    #dot { position: absolute; width: 22px; height: 22px; border: 3px solid #fff; background: #e7af21; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; transition: left .1s, top .1s; }
+    .controls { display: grid; gap: 12px; } .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    button, input[type="file"] { min-height: 48px; font: inherit; }
+    button { flex: 1 1 135px; border: 0; border-radius: 9px; padding: 10px 14px; color: #081015; background: #83d4ff; font-weight: 800; cursor: pointer; }
+    button:disabled, input:disabled { opacity: .48; cursor: not-allowed; }
+    #estopButton { background: #ff5e63; color: #210307; min-height: 60px; font-size: 1.08rem; }
+    #rpmSlider { width: 100%; min-height: 40px; accent-color: #83d4ff; }
+    .message { min-height: 1.5em; border-radius: 8px; padding: 9px; background: #15202a; color: #d4e6f1; } .message.error { background: #4b2429; color: #ffd9d9; }
+    .instruction { color: #d8e8f1; line-height: 1.55; } .small { color: #aabdc9; font-size: .88rem; }
+    @media (min-width: 680px) { body { padding: 24px; } .cards { grid-template-columns: repeat(4, minmax(0, 1fr)); } .board { max-width: 430px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>균형 제어 대시보드</h1><p class="small">표시값은 참고용이며, 모터 안전 판단은 펌웨어가 최종 결정합니다.</p></header>
+    <section class="panel"><h2>안전 상태</h2><div class="cards">
+      <div class="card"><span class="label">헬멧</span><span class="value" id="helmetStatus">연결 확인 중</span></div>
+      <div class="card"><span class="label">탑승 인원</span><span class="value" id="peopleCount">-</span></div>
+      <div class="card"><span class="label">모터 허용</span><span class="value" id="motorAllowed">-</span></div>
+      <div class="card"><span class="label">잠금 사유</span><span class="value" id="lockReason">-</span></div>
+    </div></section>
+    <section class="panel"><h2>4점 하중 및 무게 중심</h2><div class="board" aria-label="LC1부터 LC4까지의 4분할 보드">
+      <div class="quadrant"><span class="label">LC1</span><strong id="lc1">-</strong></div><div class="quadrant"><span class="label">LC2</span><strong id="lc2">-</strong></div>
+      <div class="quadrant"><span class="label">LC3</span><strong id="lc3">-</strong></div><div class="quadrant"><span class="label">LC4</span><strong id="lc4">-</strong></div><div id="dot" aria-label="무게 중심" role="img"></div>
+    </div></section>
+    <section class="panel controls"><h2>모터 제어</h2><div class="cards">
+      <div class="card"><span class="label">상태</span><span class="value" id="motorState">-</span></div><div class="card"><span class="label">목표 RPM</span><span class="value" id="targetRpm">-</span></div>
+      <div class="card"><span class="label">실제 RPM</span><span class="value" id="actualRpm">-</span></div><div class="card"><span class="label">PWM / 엔코더 / 고장</span><span class="value" id="motorDetail">-</span></div>
+    </div><button id="motorToggle" type="button" disabled>모터 ON</button><label for="rpmSlider">목표 RPM: <strong id="rpmProposed">0</strong></label>
+    <input id="rpmSlider" type="range" min="0" max="300" step="1" value="0" disabled><button id="estopButton" type="button">긴급 정지 (ESTOP)</button><div class="row"><button id="faultReset" type="button" disabled>고장/ESTOP 재설정</button></div>
+    </section>
+    <section class="panel controls"><h2>엔코더 보정</h2><p class="instruction">모터를 정지하고 바퀴를 들어 올린 뒤 시작을 누르세요. 출력축/바퀴를 정확히 한 바퀴 회전한 후 마침을 누르세요.</p><div class="row"><button id="calibrationStart" type="button" disabled>보정 시작</button><button id="calibrationFinish" type="button" disabled>보정 마침</button></div></section>
+    <section class="panel controls"><h2>대시보드 HTML 교체</h2><p class="small">HTML 파일만 업로드할 수 있습니다. 서버가 성공을 확인한 경우에만 새 페이지를 엽니다.</p><label for="htmlUpload">교체할 HTML 파일</label><input id="htmlUpload" type="file" accept=".html,text/html"><button id="uploadButton" type="button">HTML 업로드</button></section>
+    <p id="commandMessage" class="message" role="status" aria-live="polite">데이터를 불러오는 중입니다.</p>
+  </main>
+  <script>
+    (() => {
+      "use strict";
+      const byId = (id) => document.getElementById(id);
+      const elements = Object.fromEntries(["helmetStatus", "peopleCount", "motorAllowed", "lockReason", "lc1", "lc2", "lc3", "lc4", "dot", "motorToggle", "rpmSlider", "targetRpm", "actualRpm", "motorState", "estopButton", "faultReset", "calibrationStart", "calibrationFinish", "htmlUpload", "uploadButton", "commandMessage", "rpmProposed", "motorDetail"].map((id) => [id, byId(id)]));
+      const DATA_TIMEOUT_MS = 1000;
+      let latestData = null, dataInFlight = null, dataAbortController = null, dataGeneration = 0;
+      let commandBusy = false, pendingCommands = 0, commandSequence = 0, rpmTimer = null, pollTimer = null, rpmInteracting = false;
+      const clamp = (value, low, high) => Math.max(low, Math.min(high, Number(value) || 0));
+      const numberText = (value, digits = 1) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "-";
+      const helmetLabel = (helmet) => ({ worn: "착용", not_worn: "미착용", signal_lost: "신호 끊김" }[helmet] || "신호 끊김");
+      const showMessage = (text, isError = false) => { elements.commandMessage.textContent = text; elements.commandMessage.classList.toggle("error", isError); };
+      function setNormalControlsDisabled(disabled) {
+        [elements.motorToggle, elements.rpmSlider, elements.faultReset, elements.calibrationStart, elements.calibrationFinish].forEach((element) => { element.disabled = disabled; });
+        elements.estopButton.disabled = false;
+      }
+      function renderFailSafe(reason) {
+        latestData = null;
+        elements.helmetStatus.textContent = "데이터 연결 끊김"; elements.peopleCount.textContent = "-"; elements.motorAllowed.textContent = "잠김"; elements.lockReason.textContent = reason;
+        ["lc1", "lc2", "lc3", "lc4"].forEach((key) => { elements[key].textContent = "-"; }); elements.dot.style.left = "50%"; elements.dot.style.top = "50%";
+        elements.motorState.textContent = "데이터 연결 끊김"; elements.targetRpm.textContent = "-"; elements.actualRpm.textContent = "-"; elements.motorDetail.textContent = "-";
+        setNormalControlsDisabled(true); showMessage(`데이터 오류: ${reason}`, true);
+      }
+      function render(data, { reconcileRpm = false } = {}) {
+        latestData = data; const state = data.motorState || "locked";
+        elements.helmetStatus.textContent = helmetLabel(data.helmet); elements.peopleCount.textContent = Number(data.people) === -1 ? "수집 중" : String(data.people ?? "-");
+        elements.motorAllowed.textContent = data.motorAllowed === true ? "허용" : "잠김"; elements.lockReason.textContent = data.lockReason || "-";
+        ["lc1", "lc2", "lc3", "lc4"].forEach((key) => { elements[key].textContent = numberText(data[key]); });
+        elements.dot.style.left = `${(clamp(data.x, -1, 1) + 1) * 50}%`; elements.dot.style.top = `${(1 - clamp(data.y, -1, 1)) * 50}%`;
+        elements.motorState.textContent = state; elements.targetRpm.textContent = `${numberText(data.targetRpm, 0)} RPM`; elements.actualRpm.textContent = `${numberText(data.actualRpm)} RPM`;
+        elements.motorDetail.textContent = `PWM ${numberText(data.pwmPercent)}% · PPR ${data.pulsesPerRev ?? "-"} · ${data.fault || "정상"}`;
+        const canOn = data.motorAllowed === true && state === "ready", canOff = state === "armed" || state === "running";
+        elements.motorToggle.textContent = canOff ? "모터 OFF" : "모터 ON"; elements.motorToggle.disabled = commandBusy || !(canOn || canOff); elements.rpmSlider.disabled = commandBusy || !(state === "armed" || state === "running");
+        if (reconcileRpm) rpmInteracting = false;
+        if (!rpmInteracting || reconcileRpm) { const firmwareRpm = String(clamp(data.targetRpm, 0, 300)); elements.rpmSlider.value = firmwareRpm; elements.rpmProposed.textContent = firmwareRpm; }
+        const calibrationLocked = commandBusy || state === "armed" || state === "running" || state === "ramping_down";
+        elements.calibrationStart.disabled = calibrationLocked; elements.calibrationFinish.disabled = calibrationLocked; elements.faultReset.disabled = commandBusy || !(state === "fault" || state === "estop");
+      }
+      function invalidateDataRequest() {
+        dataGeneration += 1;
+        if (dataAbortController) dataAbortController.abort();
+        dataAbortController = null; dataInFlight = null; latestData = null; setNormalControlsDisabled(true);
+      }
+      function schedulePoll() { window.clearTimeout(pollTimer); pollTimer = window.setTimeout(pollData, 100); }
+      async function refreshData({ force = false, reconcileRpm = false } = {}) {
+        if (force) invalidateDataRequest(); else if (dataInFlight) return dataInFlight;
+        const generation = ++dataGeneration, controller = new AbortController(); let timedOut = false;
+        dataAbortController = controller;
+        const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, DATA_TIMEOUT_MS);
+        dataInFlight = fetch("/data", { cache: "no-store", signal: controller.signal }).then(async (response) => {
+          const body = await response.json(); if (!response.ok) throw new Error(body.reason || "data_request_failed");
+          if (generation === dataGeneration) render(body, { reconcileRpm });
+        }).catch((error) => {
+          if (generation === dataGeneration) renderFailSafe(timedOut ? "응답 시간 초과" : error.message);
+        }).finally(() => {
+          window.clearTimeout(timeout);
+          if (generation === dataGeneration) { dataAbortController = null; dataInFlight = null; }
+        });
+        return dataInFlight;
+      }
+      async function pollData() { await refreshData(); schedulePoll(); }
+      async function postCommand(endpoint) {
+        const sequence = ++commandSequence; pendingCommands += 1; commandBusy = true; if (latestData) render(latestData);
+        try { const response = await fetch(endpoint, { method: "POST" }); const body = await response.json(); if (sequence === commandSequence) showMessage(body.ok === true ? "명령이 수신되었습니다. 펌웨어 상태를 확인합니다." : `명령 거부: ${body.reason || "unknown"}`, body.ok !== true); }
+        catch (error) { if (sequence === commandSequence) showMessage(`명령 오류: ${error.message}`, true); }
+        finally { pendingCommands -= 1; commandBusy = pendingCommands > 0; await refreshData({ force: true, reconcileRpm: endpoint === "/motor/rpm" }); }
+      }
+      elements.motorToggle.addEventListener("click", () => { const state = latestData && latestData.motorState; postCommand(state === "armed" || state === "running" ? "/motor/off" : "/motor/on"); });
+      elements.estopButton.addEventListener("click", () => postCommand("/motor/estop")); elements.faultReset.addEventListener("click", () => postCommand("/motor/reset"));
+      elements.calibrationStart.addEventListener("click", () => postCommand("/encoder/calibration/start")); elements.calibrationFinish.addEventListener("click", () => postCommand("/encoder/calibration/finish"));
+      elements.rpmSlider.addEventListener("input", () => { const value = elements.rpmSlider.value; rpmInteracting = true; elements.rpmProposed.textContent = value; window.clearTimeout(rpmTimer); rpmTimer = window.setTimeout(() => postCommand(`/motor/rpm?value=${encodeURIComponent(value)}`), 180); });
+      elements.rpmSlider.addEventListener("change", () => { rpmInteracting = false; }); elements.rpmSlider.addEventListener("blur", () => { rpmInteracting = false; });
+      elements.uploadButton.addEventListener("click", async () => {
+        const file = elements.htmlUpload.files[0]; if (!file || !file.name.toLowerCase().endsWith(".html")) { showMessage(".html 파일을 선택하세요.", true); return; }
+        const form = new FormData(); form.append("file", file); elements.uploadButton.disabled = true;
+        try { const response = await fetch("/upload", { method: "POST", body: form }); const body = await response.json(); if (response.ok && body.ok === true) { showMessage("업로드가 확인되었습니다. 새 대시보드를 엽니다."); window.location.replace("/"); return; } showMessage(`업로드 거부: ${body.reason || "unknown"}`, true); }
+        catch (error) { showMessage(`업로드 오류: ${error.message}`, true); } finally { elements.uploadButton.disabled = false; }
+      });
+      pollData();
+    })();
+  </script>
+</body>
+</html>
