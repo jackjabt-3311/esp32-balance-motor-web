@@ -83,7 +83,7 @@ void WebInterface::handleData() {
 }
 
 void WebInterface::handleRoot() {
-  if (fsReady_ && LittleFS.exists(ACTIVE_PAGE)) {
+  if (fsReady_ && LittleFS.exists(ACTIVE_PAGE) && isValidHtmlFile(ACTIVE_PAGE)) {
     File page = LittleFS.open(ACTIVE_PAGE, FILE_READ);
     if (page) {
       server_.streamFile(page, "text/html; charset=utf-8");
@@ -169,7 +169,11 @@ void WebInterface::handleUploadComplete() {
     failUpload("invalid_upload_content_type");
   } else if (!uploadFailed_) {
     if (uploadStarted_ && uploadFileEnded_ && !uploadFileOpen_) {
-      if (!promoteUpload()) {
+      if (uploadBytes_ == 0) {
+        failUpload("empty_html");
+      } else if (!isValidHtmlFile(TEMP_PAGE)) {
+        failUpload("invalid_html");
+      } else if (!promoteUpload()) {
         failUpload(uploadFailureReason_);
       } else {
         uploadSucceeded_ = true;
@@ -272,6 +276,32 @@ void WebInterface::sendJsonResult(
     json += ",\"pulsesPerRev\":";
     json += String(pulsesPerRev);
   }
+  if (callbacks_.refreshSnapshot != nullptr) {
+    callbacks_.refreshSnapshot();
+  }
+  DashboardSnapshot snapshot{};
+  if (callbacks_.copySnapshot != nullptr) {
+    callbacks_.copySnapshot(snapshot);
+  } else {
+    snapshot.motorAllowed = false;
+    snapshot.motorState = "locked";
+    snapshot.targetRpm = 0;
+    snapshot.actualRpm = 0.0f;
+    snapshot.fault = "not_configured";
+  }
+  json += ",\"state\":{\"motorState\":\"";
+  json += jsonEscape(snapshot.motorState);
+  json += "\",\"targetRpm\":";
+  json += String(snapshot.targetRpm);
+  json += ",\"actualRpm\":";
+  json += String(snapshot.actualRpm, 3);
+  json += ",\"motorAllowed\":";
+  json += snapshot.motorAllowed ? "true" : "false";
+  json += ",\"ready\":";
+  json += snapshot.motorAllowed ? "true" : "false";
+  json += ",\"fault\":\"";
+  json += jsonEscape(snapshot.fault);
+  json += "\"}";
   json += "}";
   server_.send(status, "application/json; charset=utf-8", json);
 }
@@ -340,6 +370,37 @@ bool WebInterface::promoteUpload() {
     LittleFS.remove("/index.bak");
   }
   return true;
+}
+
+bool WebInterface::isValidHtmlFile(const char* path) const {
+  if (!fsReady_ || path == nullptr) return false;
+  File page = LittleFS.open(path, FILE_READ);
+  if (!page || page.size() == 0) {
+    if (page) page.close();
+    return false;
+  }
+
+  String prefix;
+  prefix.reserve(HTML_VALIDATION_BYTES);
+  while (page.available() && prefix.length() < HTML_VALIDATION_BYTES) {
+    const int next = page.read();
+    if (next < 0) break;
+    prefix += static_cast<char>(next);
+  }
+  page.close();
+
+  size_t first = 0;
+  while (first < prefix.length()) {
+    const char character = prefix.charAt(first);
+    if (character != ' ' && character != '\t' && character != '\r' &&
+        character != '\n' && character != '\f') {
+      break;
+    }
+    ++first;
+  }
+  String document = prefix.substring(first);
+  document.toLowerCase();
+  return document.startsWith("<!doctype html") || document.startsWith("<html");
 }
 
 bool WebInterface::isStrictRpm(const String& value, uint16_t* rpm) {

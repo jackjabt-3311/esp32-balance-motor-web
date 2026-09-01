@@ -94,13 +94,16 @@ CommandResult MotorController::requestEstop() {
 CommandResult MotorController::requestReset(const SafetySnapshot& safety) {
   if (state_ == MotorState::RAMPING_DOWN) return {false, "ramping"};
   if (pwmPercent_ > 0.0f) return {false, "output_active"};
+  if (!safety.prerequisitesReady) {
+    return {false, "reset_prerequisites_not_ready"};
+  }
   forceStopOutputs();
   targetRpm_ = 0;
   resetControllerHistory();
   stallTiming_ = false;
   faultReason_ = "";
-  state_ = safety.ready ? MotorState::READY : MotorState::LOCKED;
-  return {true, safety.ready ? "ready" : "safety_locked"};
+  state_ = MotorState::READY;
+  return {true, "ready"};
 }
 
 CommandResult MotorController::setTargetRpm(uint16_t rpm) {

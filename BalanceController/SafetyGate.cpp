@@ -28,8 +28,12 @@ SafetySnapshot SafetyGate::evaluate(
   const bool onePersonStable =
       people_ == 1 && onePersonTiming_ &&
       (nowMs - onePersonSinceMs_ >= PEOPLE_STABLE_MS);
-  const bool ready = helmetFresh && helmetWorn_ && onePersonStable &&
-      encoderCalibrated && !motorFault;
+  // Keep the fault-excluded conditions available to reset handling.  `ready`
+  // intentionally includes motorFault, so it cannot safely authorize clearing
+  // that very latch.
+  const bool prerequisitesReady =
+      helmetFresh && helmetWorn_ && onePersonStable && encoderCalibrated;
+  const bool ready = prerequisitesReady && !motorFault;
 
   const char* lockReason = "ready";
   if (!helmetFresh) {
@@ -48,5 +52,5 @@ SafetySnapshot SafetyGate::evaluate(
 
   return {
       helmetWorn_, helmetFresh, onePersonStable, encoderCalibrated, motorFault,
-      ready, lockReason};
+      prerequisitesReady, ready, lockReason};
 }

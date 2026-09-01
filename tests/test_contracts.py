@@ -17,6 +17,7 @@ PLANNED_FILES = (
     "BalanceController/LoadFeatureModel.h",
     "BalanceController/model.c",
     "BalanceController/BalanceController.ino",
+    "BalanceController/LocalConfig.example.h",
     "BalanceController/SafetyGate.h",
     "BalanceController/SafetyGate.cpp",
     "BalanceController/EncoderService.h",
@@ -64,6 +65,7 @@ class UploadLifecycleReference:
         self.failed = False
         self.reason = "upload_incomplete"
         self.upload_reads = 0
+        self.temp_content = None
 
     @staticmethod
     def is_multipart(content_type):
@@ -81,29 +83,42 @@ class UploadLifecycleReference:
             self.failed, self.reason, self.temp = True, "multiple_files", None
             return
         self.started, self.temp = True, "new-page"
+        self.temp_content = "<!doctype html><html><body>new page</body></html>"
 
     def end_file(self):
         if not self.failed and self.started:
             self.ended = True
 
     def abort(self):
-        self.temp = None
+        self.temp = self.temp_content = None
         self.started = self.ended = self.failed = False
         self.reason = "upload_incomplete"
 
     def finalize(self, content_type):
         if not self.is_multipart(content_type):
             self.failed, self.reason = True, "invalid_upload_content_type"
+        if not self.failed and self.started and self.ended and self.temp_content == "":
+            self.failed, self.reason = True, "empty_html"
+        if not self.failed and self.started and self.ended and not self.is_valid_html(self.temp_content):
+            self.failed, self.reason = True, "invalid_html"
         if not self.failed and self.started and self.ended:
             self.backup, self.active, self.temp = self.active, self.temp, None
+            self.temp_content = None
             self.backup = None
             status, reason = 200, "upload_promoted"
         else:
-            self.temp = None
+            self.temp = self.temp_content = None
             status, reason = 400, self.reason
         self.started = self.ended = self.failed = False
         self.reason = "upload_incomplete"
         return status, reason
+
+    @staticmethod
+    def is_valid_html(content):
+        if not content:
+            return False
+        document = content.lstrip(" \t\r\n\f").lower()
+        return document.startswith("<!doctype html") or document.startswith("<html")
 
 
 class SharedContractTests(unittest.TestCase):
@@ -326,6 +341,19 @@ class SharedContractTests(unittest.TestCase):
         self.assertIn('return {false, "ramping"}', reset_body)
         self.assertLess(reset_body.index(ramp_check), reset_body.index(output_check))
 
+    def test_reset_requires_non_motor_safety_prerequisites_before_clearing_latch(self):
+        header = (ROOT / "BalanceController/SafetyGate.h").read_text(encoding="utf-8")
+        safety = (ROOT / "BalanceController/SafetyGate.cpp").read_text(encoding="utf-8")
+        motor = (ROOT / "BalanceController/MotorController.cpp").read_text(encoding="utf-8")
+        reset_body = motor.split("CommandResult MotorController::requestReset", 1)[1].split(
+            "CommandResult MotorController::setTargetRpm", 1
+        )[0]
+        self.assertIn("bool prerequisitesReady", header)
+        self.assertIn("const bool prerequisitesReady", safety)
+        self.assertIn("!safety.prerequisitesReady", reset_body)
+        self.assertIn('return {false, "reset_prerequisites_not_ready"}', reset_body)
+        self.assertLess(reset_body.index("!safety.prerequisitesReady"), reset_body.index("faultReason_ = \"\""))
+
     def test_motor_pid_uses_conditional_integration_to_prevent_windup(self):
         source = (ROOT / "BalanceController/MotorController.cpp").read_text(encoding="utf-8")
         pid_body = source.split("void MotorController::tickPid", 1)[1].split(
@@ -466,6 +494,23 @@ class SharedContractTests(unittest.TestCase):
         self.assertIn("HelmetTransmitter/LocalConfig.h", ignored)
         self.assertNotIn(FORBIDDEN_LOCAL_PATH_PREFIX, example.lower())
         self.assertIn("WIFI_CHANNEL = 1", receiver)
+
+    def test_main_ap_credentials_are_local_and_not_tracked(self):
+        source = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        example = (ROOT / "BalanceController/LocalConfig.example.h").read_text(encoding="utf-8")
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        tracked_text = "\n".join(
+            path.read_text(encoding="utf-8", errors="ignore")
+            for path in ROOT.rglob("*")
+            if path.is_file() and ".git" not in path.parts and ".build" not in path.parts
+            and "__pycache__" not in path.parts and path.name != "LocalConfig.h"
+        )
+        self.assertIn('#include "LocalConfig.h"', source)
+        self.assertNotIn("constexpr char AP_PASSWORD", source)
+        self.assertIn("BalanceController/LocalConfig.h", ignored)
+        self.assertIn("CHANGE_ME_8_CHARS", example)
+        forbidden_default = "1234" + "5678"
+        self.assertNotIn(forbidden_default, tracked_text)
 
     def test_web_interface_declares_callback_adapters_and_exact_snapshot_fields(self):
         header = (ROOT / "BalanceController/WebInterface.h").read_text(encoding="utf-8")
@@ -653,6 +698,90 @@ class SharedContractTests(unittest.TestCase):
         )[0]
         self.assertIn("promoteUpload", final_body)
         self.assertIn("uploadStarted_ && uploadFileEnded_", final_body)
+
+    def test_web_upload_and_root_require_bounded_recognizable_html(self):
+        empty = UploadLifecycleReference()
+        empty.start_file("multipart/form-data; boundary=abc")
+        empty.end_file()
+        empty.temp_content = ""
+        self.assertEqual(empty.finalize("multipart/form-data; boundary=abc"), (400, "empty_html"))
+        self.assertEqual(empty.active, "old-page")
+
+        invalid = UploadLifecycleReference()
+        invalid.start_file("multipart/form-data; boundary=abc")
+        invalid.end_file()
+        invalid.temp_content = "not an html document"
+        self.assertEqual(invalid.finalize("multipart/form-data; boundary=abc"), (400, "invalid_html"))
+        self.assertEqual(invalid.active, "old-page")
+
+        valid = UploadLifecycleReference()
+        valid.start_file("multipart/form-data; boundary=abc")
+        valid.end_file()
+        valid.temp_content = " \n<!doctype html><html><body>ok</body></html>"
+        self.assertEqual(valid.finalize("multipart/form-data; boundary=abc"), (200, "upload_promoted"))
+        self.assertEqual(valid.active, "new-page")
+
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "BalanceController/WebInterface.h").read_text(encoding="utf-8")
+        self.assertIn("HTML_VALIDATION_BYTES", header)
+        self.assertIn("isValidHtmlFile(TEMP_PAGE)", source)
+        self.assertIn('failUpload("empty_html")', source)
+        self.assertIn('failUpload("invalid_html")', source)
+        root_body = source.split("void WebInterface::handleRoot()", 1)[1].split(
+            "void WebInterface::handleMotorCommand", 1
+        )[0]
+        self.assertIn("isValidHtmlFile(ACTIVE_PAGE)", root_body)
+        self.assertIn("<!doctype html", source.lower())
+        self.assertIn('startsWith("<html")', source)
+
+    def test_every_command_response_contains_one_coherent_current_state(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        response_body = source.split("void WebInterface::sendJsonResult", 1)[1].split(
+            "void WebInterface::failUpload", 1
+        )[0]
+        self.assertIn("callbacks_.copySnapshot(snapshot)", response_body)
+        self.assertEqual(response_body.count("callbacks_.copySnapshot(snapshot)"), 1)
+        for key in ("state", "motorState", "targetRpm", "actualRpm", "motorAllowed", "ready", "fault"):
+            self.assertIn(f'\\"{key}\\"', response_body)
+
+    def test_command_response_refreshes_snapshot_after_adapter_mutation_before_copy(self):
+        header = (ROOT / "BalanceController/WebInterface.h").read_text(encoding="utf-8")
+        web = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        main = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+
+        self.assertIn("SnapshotRefreshCallback", header)
+        self.assertIn("refreshSnapshot", header)
+        response_body = web.split("void WebInterface::sendJsonResult", 1)[1].split(
+            "void WebInterface::failUpload", 1
+        )[0]
+        refresh_at = response_body.index("callbacks_.refreshSnapshot()")
+        copy_at = response_body.index("callbacks_.copySnapshot(snapshot)")
+        self.assertLess(refresh_at, copy_at)
+
+        # C++ evaluates command() before entering sendCommandResult(), whose
+        # sendJsonResult call performs the refresh above. Check every mutable
+        # adapter path keeps that production ordering without a second call.
+        for handler, callback in (
+            ("handleMotorCommand", "command()"),
+            ("handleMotorRpm", "callbacks_.motorRpm(rpm)"),
+            ("handleCalibrationStart", "callbacks_.calibrationStart()"),
+            ("handleCalibrationFinish", "callbacks_.calibrationFinish()"),
+        ):
+            handler_body = web.split(f"void WebInterface::{handler}", 1)[1]
+            self.assertIn(callback, handler_body)
+        self.assertEqual(web.count("callbacks_.refreshSnapshot()"), 1)
+
+        refresh_body = main.split("void refreshDashboardSnapshot() {", 1)[1].split(
+            "CommandResult motorOnAdapter", 1
+        )[0]
+        self.assertIn("safety.evaluate", refresh_body)
+        self.assertIn("updateDashboardSnapshot", refresh_body)
+        self.assertLess(refresh_body.index("safety.evaluate"), refresh_body.index("updateDashboardSnapshot"))
+        callback_initializer = main.split("const WebCallbacks WEB_CALLBACKS", 1)[1].split(
+            "WebInterface web", 1
+        )[0]
+        self.assertLess(callback_initializer.index("refreshDashboardSnapshot"),
+                        callback_initializer.index("motorOnAdapter"))
 
     def test_web_upload_abort_resets_without_final_response_then_allows_fresh_upload(self):
         lifecycle = UploadLifecycleReference()

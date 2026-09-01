@@ -229,6 +229,12 @@ class SafetyGateReference:
             and self.one_person_timing
             and self.elapsed(now_ms, self.one_person_since_ms) >= 1000
         )
+        prerequisites_ready = (
+            helmet_fresh
+            and self.helmet_worn
+            and one_person_stable
+            and encoder_calibrated
+        )
 
         if not helmet_fresh:
             reason = "helmet_signal_lost"
@@ -251,6 +257,7 @@ class SafetyGateReference:
             "onePersonStable": one_person_stable,
             "encoderCalibrated": encoder_calibrated,
             "motorFault": motor_fault,
+            "prerequisitesReady": prerequisites_ready,
             "ready": reason == "ready",
             "lockReason": reason,
         }
@@ -587,15 +594,17 @@ class MotorReference:
         self.fault_reason = "estop"
         return True, "estop"
 
-    def request_reset(self, safety_ready):
+    def request_reset(self, prerequisites_ready):
         if self.state == "ramping_down":
             return False, "ramping"
         if self.duty != 0:
             return False, "output_active"
+        if not prerequisites_ready:
+            return False, "reset_prerequisites_not_ready"
         self._stop()
         self.fault_reason = ""
-        self.state = "ready" if safety_ready else "locked"
-        return True, "ready" if safety_ready else "safety_locked"
+        self.state = "ready"
+        return True, "ready"
 
     def _reset_pid(self):
         self.integral = 0.0
@@ -746,8 +755,9 @@ class MotorReferenceTests(unittest.TestCase):
         motor.state = "fault"
         self.assertEqual(motor.request_reset(True), (False, "output_active"))
         motor.duty = 0.0
-        self.assertEqual(motor.request_reset(False), (True, "safety_locked"))
-        self.assertEqual(motor.state, "locked")
+        motor.fault_reason = "encoder_stall"
+        self.assertEqual(motor.request_reset(False), (False, "reset_prerequisites_not_ready"))
+        self.assertEqual((motor.state, motor.fault_reason), ("fault", "encoder_stall"))
         self.assertEqual(motor.request_reset(True), (True, "ready"))
         self.assertEqual(motor.state, "ready")
 

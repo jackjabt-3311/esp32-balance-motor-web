@@ -8,6 +8,8 @@ struct SafetySnapshot {
   bool onePersonStable;
   bool encoderCalibrated;
   bool motorFault;
+  // All conditions needed to clear an ESTOP/fault latch, excluding motor fault.
+  bool prerequisitesReady;
   bool ready;
   const char* lockReason;
 };

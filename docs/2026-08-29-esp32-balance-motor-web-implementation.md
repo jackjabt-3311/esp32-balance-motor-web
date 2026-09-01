@@ -534,7 +534,7 @@ Run all Python tests, calculate SHA-256 hashes for deliverable sources, and sear
 
 - [ ] **Step 4: Write README setup instructions**
 
-Include exact wiring, shared-ground warning, separate 12 V motor power, channel 1, AP connection, initial firmware upload, LittleFS fallback/upload flow, one-turn encoder calibration, low-speed first run, PID tuning caution, ON/slider/OFF behavior, two-second safety ramp, and immediate emergency-stop/fault behavior. State that `12345678` is weak and should be changed before use around other people.
+Include exact wiring, shared-ground warning, separate 12 V motor power, channel 1, AP connection, initial firmware upload, LittleFS fallback/upload flow, one-turn encoder calibration, low-speed first run, PID tuning caution, ON/slider/OFF behavior, two-second safety ramp, and immediate emergency-stop/fault behavior. State that the AP password belongs in ignored local configuration, must be at least eight characters, and must not be published or reused.
 
 - [ ] **Step 5: Perform final spec-to-package audit**
 

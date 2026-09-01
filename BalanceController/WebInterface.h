@@ -27,6 +27,7 @@ struct DashboardSnapshot {
 };
 
 using SnapshotCopyCallback = void (*)(DashboardSnapshot& snapshot);
+using SnapshotRefreshCallback = void (*)();
 using MotorCommandCallback = CommandResult (*)();
 using RpmCommandCallback = CommandResult (*)(uint16_t rpm);
 using CalibrationCommandCallback = CommandResult (*)();
@@ -34,6 +35,7 @@ using PulsesPerRevCallback = uint32_t (*)();
 
 struct WebCallbacks {
   SnapshotCopyCallback copySnapshot;
+  SnapshotRefreshCallback refreshSnapshot;
   MotorCommandCallback motorOn;
   MotorCommandCallback motorOff;
   RpmCommandCallback motorRpm;
@@ -47,6 +49,7 @@ struct WebCallbacks {
 class WebInterface {
  public:
   static constexpr size_t MAX_UPLOAD_BYTES = 262144;
+  static constexpr size_t HTML_VALIDATION_BYTES = 256;
 
   explicit WebInterface(const WebCallbacks& callbacks);
 
@@ -74,6 +77,7 @@ class WebInterface {
   void cleanupUploadTemp();
   void resetUploadRequest();
   bool promoteUpload();
+  bool isValidHtmlFile(const char* path) const;
 
   static bool isStrictRpm(const String& value, uint16_t* rpm);
   static bool isHtmlFilename(const String& filename);

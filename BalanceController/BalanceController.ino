@@ -5,6 +5,7 @@
 #include "EncoderService.h"
 #include "HelmetReceiver.h"
 #include "LoadFeatureModel.h"
+#include "LocalConfig.h"
 #include "MotorController.h"
 #include "SafetyGate.h"
 #include "WebInterface.h"
@@ -12,9 +13,6 @@
 extern "C" void score(double*, double*);
 
 namespace {
-constexpr char AP_SSID[] = "ESP32_Balance";
-constexpr char AP_PASSWORD[] = "12345678";
-
 constexpr uint8_t LC1_DOUT = 34;
 constexpr uint8_t LC1_SCK = 16;
 constexpr uint8_t LC2_DOUT = 36;
@@ -76,9 +74,11 @@ CommandResult calibrationFinishAdapter();
 uint32_t savedPulsesPerRevAdapter();
 void queueHelmetUpdate(bool worn, uint32_t nowMs);
 void copyDashboardSnapshot(DashboardSnapshot& snapshot);
+void refreshDashboardSnapshot();
 
 const WebCallbacks WEB_CALLBACKS{
     copyDashboardSnapshot,
+    refreshDashboardSnapshot,
     motorOnAdapter,
     motorOffAdapter,
     motorRpmAdapter,
@@ -314,6 +314,14 @@ void updateDashboardSnapshot(const SafetySnapshot& safetySnapshot) {
   dashboardSnapshot.encoderCalibrated = encoder.isCalibrated();
   dashboardSnapshot.pulsesPerRev = encoder.pulsesPerRevolution();
   dashboardSnapshot.fault = dashboardFault();
+}
+
+void refreshDashboardSnapshot() {
+  const uint32_t nowMs = millis();
+  const bool encoderReady = encoder.isCalibrated() && !encoder.isCalibrating();
+  latestSafetySnapshot =
+      safety.evaluate(nowMs, encoderReady, safetyFaultLatched());
+  updateDashboardSnapshot(latestSafetySnapshot);
 }
 
 CommandResult motorOnAdapter() { return motor.requestOn(latestSafetySnapshot); }

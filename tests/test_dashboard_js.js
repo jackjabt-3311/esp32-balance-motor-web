@@ -90,13 +90,13 @@ async function exerciseActualCommandRace() {
     assert.equal(elements.rpmSlider.disabled, true);
     assert.equal(elements.estopButton.disabled, false);
 
-    respond(requests[2], { ok: true }); // newer ESTOP completes first
+    respond(requests[2], { ok: true, state: { ...armed, motorState: "estop", motorAllowed: false, fault: "estop" } }); // newer ESTOP completes first
     await flush();
     assert.equal(requests[3].url, "/data", "ESTOP completion forces data refresh");
     assert.equal(elements.motorToggle.disabled, true);
     assert.equal(elements.estopButton.disabled, false);
 
-    respond(requests[1], { ok: true }); // older normal completion arrives last
+    respond(requests[1], { ok: true, state: armed }); // older normal completion arrives last
     await flush();
     assert.equal(requests[4].url, "/data", "older completion starts a newer data generation");
     assert.equal(elements.motorToggle.disabled, true, "cached armed state must not re-enable normal control");
