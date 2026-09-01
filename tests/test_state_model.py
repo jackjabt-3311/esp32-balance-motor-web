@@ -1,7 +1,196 @@
+import math
+from pathlib import Path
 import unittest
 
 
 UINT32_MASK = 0xFFFFFFFF
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class LoadModelReference:
+    """Numerical oracle for the supplied HX711 classifier and display formulas."""
+
+    WINDOW_SIZE = 20
+    NOISE_THRESHOLD = 100000.0
+    EPSILON = 1e-6
+
+    @staticmethod
+    def mean(values):
+        return sum(values) / len(values)
+
+    @classmethod
+    def std(cls, values, average):
+        return math.sqrt(sum((value - average) ** 2 for value in values) / len(values))
+
+    @classmethod
+    def correlation(cls, first, second, first_mean, second_mean, first_std, second_std):
+        if first_std < cls.EPSILON or second_std < cls.EPSILON:
+            return 0.0
+        covariance = sum(
+            (left - first_mean) * (right - second_mean)
+            for left, right in zip(first, second)
+        ) / len(first)
+        return covariance / (first_std * second_std)
+
+    @classmethod
+    def features(cls, history):
+        w1, w2, w3, w4 = ([row[index] for row in history] for index in range(4))
+        total = [a + b + c + d for a, b, c, d in zip(w1, w2, w3, w4)]
+        front = [a + b for a, b in zip(w1, w2)]
+        rear = [a + b for a, b in zip(w3, w4)]
+        left = [a + b for a, b in zip(w1, w3)]
+        right = [a + b for a, b in zip(w2, w4)]
+        cx = [(b * 280.0 + d * 280.0) / (t + cls.EPSILON)
+              for b, d, t in zip(w2, w4, total)]
+        cy = [(c * 700.0 + d * 700.0) / (t + cls.EPSILON)
+              for c, d, t in zip(w3, w4, total)]
+        means = [cls.mean(values) for values in (w1, w2, w3, w4)]
+        stds = [cls.std(values, average) for values, average in zip((w1, w2, w3, w4), means)]
+        total_mean = cls.mean(total)
+        front_mean, rear_mean = cls.mean(front), cls.mean(rear)
+        front_std, rear_std = cls.std(front, front_mean), cls.std(rear, rear_mean)
+        cx_mean = cls.mean(cx)
+        return [
+            total_mean, cls.std(total, total_mean),
+            means[0], stds[0], means[1], stds[1], means[2], stds[2], means[3], stds[3],
+            (front_mean + cls.EPSILON) / (rear_mean + cls.EPSILON),
+            cls.correlation(front, rear, front_mean, rear_mean, front_std, rear_std),
+            (cls.mean(left) + cls.EPSILON) / (cls.mean(right) + cls.EPSILON),
+            cx_mean, cls.std(cx, cx_mean), cls.mean(cy),
+        ]
+
+    @classmethod
+    def display(cls, weights):
+        positive = [max(0.0, value) for value in weights]
+        total = sum(positive)
+        if total <= cls.NOISE_THRESHOLD:
+            return [0.0, 0.0, 0.0, 0.0], 0.0, 0.0
+        percentages = [value * 100.0 / total for value in positive]
+        x = ((positive[1] + positive[3]) - (positive[0] + positive[2])) * 100.0 / total
+        y = ((positive[0] + positive[1]) - (positive[2] + positive[3])) * 100.0 / total
+        return percentages, x, y
+
+
+class LoadSubsystemReference:
+    """Boot failure is a reboot-only lockout; it must never feed zeroes to ML."""
+
+    READY_TIMEOUT_MS = 500
+
+    def __init__(self):
+        self.failed = False
+        self.people = -1
+        self.last_ready_ms = 0
+
+    def initialize(self, ready):
+        if not ready:
+            self.failed = True
+
+    def sample(self):
+        if self.failed:
+            self.people = -1
+            return False
+        return True
+
+    def note_runtime_readiness(self, ready, now_ms):
+        if ready:
+            self.last_ready_ms = now_ms
+            return self.sample()
+        if ((now_ms - self.last_ready_ms) & UINT32_MASK) >= self.READY_TIMEOUT_MS:
+            self.failed = True
+            self.people = -1
+            return False
+        return self.sample()
+
+
+class LoadModelReferenceTests(unittest.TestCase):
+    def test_signed_golden_window_preserves_all_16_original_features(self):
+        history = [[-200000.0, 400000.0, 600000.0, -100000.0]] * LoadModelReference.WINDOW_SIZE
+        features = LoadModelReference.features(history)
+
+        expected = [
+            700000.0, 0.0, -200000.0, 0.0, 400000.0, 0.0, 600000.0, 0.0, -100000.0, 0.0,
+            (200000.0 + 1e-6) / (500000.0 + 1e-6), 0.0,
+            (400000.0 + 1e-6) / (300000.0 + 1e-6),
+            120.0, 0.0, 500.0,
+        ]
+        self.assertEqual(len(features), 16)
+        for actual, wanted in zip(features, expected):
+            self.assertAlmostEqual(actual, wanted, places=5)
+
+    def test_nonpositive_ratio_denominators_keep_original_epsilon_division(self):
+        history = [[0.0, -3.0, -2.0, -4.0]] * LoadModelReference.WINDOW_SIZE
+        features = LoadModelReference.features(history)
+
+        self.assertAlmostEqual(features[10], (-3.0 + 1e-6) / (-6.0 + 1e-6), places=7)
+        self.assertAlmostEqual(features[12], (-2.0 + 1e-6) / (-7.0 + 1e-6), places=7)
+
+    def test_near_constant_front_rear_values_use_original_correlation_floor(self):
+        front = [0.0, 1e-7] * 10
+        rear = [0.0, -1e-7] * 10
+        front_mean, rear_mean = LoadModelReference.mean(front), LoadModelReference.mean(rear)
+        self.assertEqual(
+            LoadModelReference.correlation(
+                front, rear, front_mean, rear_mean,
+                LoadModelReference.std(front, front_mean),
+                LoadModelReference.std(rear, rear_mean),
+            ),
+            0.0,
+        )
+
+    def test_display_uses_nonnegative_weights_noise_gate_and_percent_scaled_cog(self):
+        percentages, x, y = LoadModelReference.display([-100000.0, 220000.0, 320000.0, 420000.0])
+        total = 960000.0
+        self.assertEqual(percentages[0], 0.0)
+        self.assertAlmostEqual(percentages[1], 220000.0 * 100.0 / total)
+        self.assertAlmostEqual(x, ((220000.0 + 420000.0) - 320000.0) * 100.0 / total)
+        self.assertAlmostEqual(y, ((220000.0) - (320000.0 + 420000.0)) * 100.0 / total)
+        self.assertEqual(LoadModelReference.display([25000.0] * 4), ([0.0] * 4, 0.0, 0.0))
+
+    def test_failed_load_initialization_remains_collecting_and_ineligible(self):
+        subsystem = LoadSubsystemReference()
+        subsystem.initialize(False)
+        self.assertFalse(subsystem.sample())
+        self.assertTrue(subsystem.failed)
+        self.assertEqual(subsystem.people, -1)
+
+    def test_short_not_ready_interval_preserves_last_reading_without_latching(self):
+        subsystem = LoadSubsystemReference()
+        self.assertTrue(subsystem.note_runtime_readiness(True, 1000))
+        self.assertTrue(subsystem.note_runtime_readiness(False, 1050))
+        self.assertTrue(subsystem.note_runtime_readiness(False, 1499))
+        self.assertFalse(subsystem.failed)
+
+    def test_sustained_not_ready_interval_latches_before_future_classification(self):
+        subsystem = LoadSubsystemReference()
+        self.assertTrue(subsystem.note_runtime_readiness(True, 1000))
+        self.assertFalse(subsystem.note_runtime_readiness(False, 1500))
+        self.assertFalse(subsystem.note_runtime_readiness(True, 1501))
+        self.assertTrue(subsystem.failed)
+        self.assertEqual(subsystem.people, -1)
+
+    def test_readiness_elapsed_time_is_rollover_safe(self):
+        subsystem = LoadSubsystemReference()
+        self.assertTrue(subsystem.note_runtime_readiness(True, 0xFFFFFF00))
+        self.assertFalse(subsystem.note_runtime_readiness(False, 0x000000F4))
+
+
+class LoadIntegrationContractTests(unittest.TestCase):
+    def test_main_sketch_uses_original_load_model_and_reboot_only_fault_lockout(self):
+        main = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        helper = (ROOT / "BalanceController/LoadFeatureModel.h").read_text(encoding="utf-8")
+        source = main + "\n" + helper
+        for token in (
+            "loadSubsystemFault",
+            "if (loadSubsystemFault)",
+            "(frontMean + FEATURE_EPSILON) / (rearMean + FEATURE_EPSILON)",
+            "frontStd < FEATURE_EPSILON || rearStd < FEATURE_EPSILON",
+            "(w2 + w4) * 280.0",
+            "(w3 + w4) * 700.0",
+            "totalWeight > NOISE_THRESHOLD",
+            "* 100.0f",
+            "load_cell_fault",
+        ):
+            self.assertIn(token, source)
 
 
 class SafetyGateReference:

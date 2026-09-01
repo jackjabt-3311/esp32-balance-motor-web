@@ -8,6 +8,9 @@ namespace {
 constexpr char ACTIVE_PAGE[] = "/index.html";
 constexpr char TEMP_PAGE[] = "/index.tmp";
 constexpr char BACKUP_PAGE[] = "/index.bak";
+constexpr int HTTP_STATUS_OK = 200;
+constexpr int HTTP_STATUS_BAD_REQUEST = 400;
+constexpr int HTTP_STATUS_CONFLICT = 409;
 const char* REQUEST_HEADERS[] = {"Content-Type"};
 
 const char RECOVERY_PAGE[] PROGMEM = R"HTML(<!doctype html>
@@ -51,7 +54,7 @@ void WebInterface::handleClient() {
 
 void WebInterface::handleData() {
   if (callbacks_.copySnapshot == nullptr) {
-    sendJsonResult(HTTP_CONFLICT, false, "not_configured");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "not_configured");
     return;
   }
   DashboardSnapshot snapshot{};
@@ -76,7 +79,7 @@ void WebInterface::handleData() {
   json += ",\"encoderCalibrated\":"; json += snapshot.encoderCalibrated ? "true" : "false";
   json += ",\"pulsesPerRev\":"; json += String(snapshot.pulsesPerRev);
   json += ",\"fault\":\""; json += jsonEscape(snapshot.fault); json += "\"}";
-  server_.send(HTTP_OK, "application/json; charset=utf-8", json);
+  server_.send(HTTP_STATUS_OK, "application/json; charset=utf-8", json);
 }
 
 void WebInterface::handleRoot() {
@@ -88,12 +91,12 @@ void WebInterface::handleRoot() {
       return;
     }
   }
-  server_.send(HTTP_OK, "text/html; charset=utf-8", RECOVERY_PAGE);
+  server_.send(HTTP_STATUS_OK, "text/html; charset=utf-8", RECOVERY_PAGE);
 }
 
 void WebInterface::handleMotorCommand(MotorCommandCallback command) {
   if (command == nullptr) {
-    sendJsonResult(HTTP_CONFLICT, false, "not_configured");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "not_configured");
     return;
   }
   sendCommandResult(command());
@@ -101,18 +104,18 @@ void WebInterface::handleMotorCommand(MotorCommandCallback command) {
 
 void WebInterface::handleMotorRpm() {
   if (!server_.hasArg("value")) {
-    sendJsonResult(HTTP_BAD_REQUEST, false, "missing_rpm");
+    sendJsonResult(HTTP_STATUS_BAD_REQUEST, false, "missing_rpm");
     return;
   }
 
   const String value = server_.arg("value");
   uint16_t rpm = 0;
   if (value.length() == 0 || !isStrictRpm(value, &rpm)) {
-    sendJsonResult(HTTP_BAD_REQUEST, false, "invalid_rpm");
+    sendJsonResult(HTTP_STATUS_BAD_REQUEST, false, "invalid_rpm");
     return;
   }
   if (callbacks_.motorRpm == nullptr) {
-    sendJsonResult(HTTP_CONFLICT, false, "not_configured");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "not_configured");
     return;
   }
   sendCommandResult(callbacks_.motorRpm(rpm));
@@ -120,17 +123,17 @@ void WebInterface::handleMotorRpm() {
 
 void WebInterface::handleCalibrationStart() {
   if (callbacks_.copySnapshot == nullptr) {
-    sendJsonResult(HTTP_CONFLICT, false, "not_configured");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "not_configured");
     return;
   }
   DashboardSnapshot snapshot{};
   callbacks_.copySnapshot(snapshot);
   if (!isMotorFullyStopped(snapshot)) {
-    sendJsonResult(HTTP_CONFLICT, false, "motor_not_stopped");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "motor_not_stopped");
     return;
   }
   if (callbacks_.calibrationStart == nullptr) {
-    sendJsonResult(HTTP_CONFLICT, false, "not_configured");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "not_configured");
     return;
   }
   sendCommandResult(callbacks_.calibrationStart());
@@ -138,17 +141,17 @@ void WebInterface::handleCalibrationStart() {
 
 void WebInterface::handleCalibrationFinish() {
   if (callbacks_.copySnapshot == nullptr) {
-    sendJsonResult(HTTP_CONFLICT, false, "not_configured");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "not_configured");
     return;
   }
   DashboardSnapshot snapshot{};
   callbacks_.copySnapshot(snapshot);
   if (!isMotorFullyStopped(snapshot)) {
-    sendJsonResult(HTTP_CONFLICT, false, "motor_not_stopped");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "motor_not_stopped");
     return;
   }
   if (callbacks_.calibrationFinish == nullptr || callbacks_.savedPulsesPerRev == nullptr) {
-    sendJsonResult(HTTP_CONFLICT, false, "not_configured");
+    sendJsonResult(HTTP_STATUS_CONFLICT, false, "not_configured");
     return;
   }
 
@@ -158,7 +161,7 @@ void WebInterface::handleCalibrationFinish() {
     return;
   }
   const uint32_t pulsesPerRev = callbacks_.savedPulsesPerRev();
-  sendJsonResult(HTTP_OK, true, result.reason, true, pulsesPerRev);
+  sendJsonResult(HTTP_STATUS_OK, true, result.reason, true, pulsesPerRev);
 }
 
 void WebInterface::handleUploadComplete() {
@@ -177,9 +180,9 @@ void WebInterface::handleUploadComplete() {
   }
 
   if (uploadSucceeded_) {
-    sendJsonResult(HTTP_OK, true, "upload_promoted");
+    sendJsonResult(HTTP_STATUS_OK, true, "upload_promoted");
   } else {
-    sendJsonResult(HTTP_BAD_REQUEST, false, uploadFailureReason_);
+    sendJsonResult(HTTP_STATUS_BAD_REQUEST, false, uploadFailureReason_);
   }
   resetUploadRequest();
 }
@@ -251,7 +254,7 @@ void WebInterface::handleUploadData() {
 }
 
 void WebInterface::sendCommandResult(const CommandResult& result) {
-  sendJsonResult(result.ok ? HTTP_OK : HTTP_CONFLICT, result.ok, result.reason);
+  sendJsonResult(result.ok ? HTTP_STATUS_OK : HTTP_STATUS_CONFLICT, result.ok, result.reason);
 }
 
 void WebInterface::sendJsonResult(

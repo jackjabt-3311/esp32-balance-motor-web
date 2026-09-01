@@ -78,7 +78,7 @@
         elements.helmetStatus.textContent = helmetLabel(data.helmet); elements.peopleCount.textContent = Number(data.people) === -1 ? "수집 중" : String(data.people ?? "-");
         elements.motorAllowed.textContent = data.motorAllowed === true ? "허용" : "잠김"; elements.lockReason.textContent = data.lockReason || "-";
         ["lc1", "lc2", "lc3", "lc4"].forEach((key) => { elements[key].textContent = numberText(data[key]); });
-        elements.dot.style.left = `${(clamp(data.x, -1, 1) + 1) * 50}%`; elements.dot.style.top = `${(1 - clamp(data.y, -1, 1)) * 50}%`;
+        elements.dot.style.left = `${(clamp(data.x, -100, 100) + 100) / 2}%`; elements.dot.style.top = `${(100 - clamp(data.y, -100, 100)) / 2}%`;
         elements.motorState.textContent = state; elements.targetRpm.textContent = `${numberText(data.targetRpm, 0)} RPM`; elements.actualRpm.textContent = `${numberText(data.actualRpm)} RPM`;
         elements.motorDetail.textContent = `PWM ${numberText(data.pwmPercent)}% · PPR ${data.pulsesPerRev ?? "-"} · ${data.fault || "정상"}`;
         const canOn = data.motorAllowed === true && state === "ready", canOff = state === "armed" || state === "running";

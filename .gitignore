@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .pio/
 build/
+.build/
 *.bin
 *.elf
 *.map

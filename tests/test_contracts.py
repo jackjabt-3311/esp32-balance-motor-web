@@ -1,4 +1,6 @@
 import hashlib
+import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -12,6 +14,7 @@ FORBIDDEN_LOCAL_PATH_PREFIX = "c:" + "/users/"
 PLANNED_FILES = (
     "BalanceController/ControlTypes.h",
     "BalanceController/ControlTypes.cpp",
+    "BalanceController/LoadFeatureModel.h",
     "BalanceController/model.c",
     "BalanceController/BalanceController.ino",
     "BalanceController/SafetyGate.h",
@@ -35,6 +38,18 @@ FUTURE_ROUTES = (
     "/motor/reset", "/encoder/calibration/start", "/encoder/calibration/finish",
     "/upload",
 )
+
+
+def esp32_cpp14_compiler():
+    """Return the installed ESP32 compiler used for header-only constexpr checks."""
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise RuntimeError("LOCALAPPDATA is required to locate the installed ESP32 compiler")
+    tool_root = Path(local_app_data) / "Arduino15" / "packages" / "esp32" / "tools" / "esp-x32"
+    candidates = sorted(tool_root.glob("*/bin/xtensa-esp32-elf-g++.exe"))
+    if not candidates:
+        raise RuntimeError("installed ESP32 xtensa C++ compiler was not found")
+    return candidates[-1]
 
 
 class UploadLifecycleReference:
@@ -501,7 +516,7 @@ class SharedContractTests(unittest.TestCase):
         )[0]
         for token in (
             'server_.hasArg("value")', "value.length() == 0", "isStrictRpm",
-            "HTTP_BAD_REQUEST", "callbacks_.motorRpm",
+            "HTTP_STATUS_BAD_REQUEST", "callbacks_.motorRpm",
         ):
             self.assertIn(token, rpm_body)
         strict_parser = source.split("bool WebInterface::isStrictRpm", 1)[1].split(
@@ -509,8 +524,11 @@ class SharedContractTests(unittest.TestCase):
         )[0]
         self.assertIn("MAX_TARGET_RPM", strict_parser)
         self.assertIn("character < '0' || character > '9'", strict_parser)
-        self.assertIn("HTTP_OK", source)
-        self.assertIn("HTTP_CONFLICT", source)
+        self.assertIn("HTTP_STATUS_OK", source)
+        self.assertIn("HTTP_STATUS_CONFLICT", source)
+        self.assertNotIn("HTTP_OK", source)
+        self.assertNotIn("HTTP_CONFLICT", source)
+        self.assertNotIn("HTTP_BAD_REQUEST", source)
         self.assertIn('\\"ok\\"', source)
         self.assertIn('\\"reason\\"', source)
 
@@ -752,6 +770,186 @@ class SharedContractTests(unittest.TestCase):
         self.assertIn("rpmInteracting", html)
         self.assertNotRegex(html, r"https?://|//[a-zA-Z0-9._-]+")
         self.assertNotRegex(html, r"<script[^>]+\bsrc=|<link[^>]+\bhref=|\bimport\s*(?:\(|[^a-zA-Z])")
+
+    def test_main_sketch_declares_exact_hx711_inputs_and_sampling_contract(self):
+        main = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        helper = (ROOT / "BalanceController/LoadFeatureModel.h").read_text(encoding="utf-8")
+        source = main + "\n" + helper
+        for token in (
+            "#include <HX711.h>",
+            "LC1_DOUT = 34", "LC1_SCK = 16",
+            "LC2_DOUT = 36", "LC2_SCK = 18",
+            "LC3_DOUT = 35", "LC3_SCK = 17",
+            "LC4_DOUT = 39", "LC4_SCK = 19",
+            "DATA_INTERVAL = 50", "NOISE_THRESHOLD = 100000.0f",
+            "WINDOW_SIZE = 20",
+        ):
+            self.assertIn(token, source)
+
+    def test_main_sketch_preserves_classifier_feature_order_and_collecting_state(self):
+        source = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        self.assertIn("extern \"C\" void score(double*, double*);", source)
+        self.assertIn("score(features, output_scores)", source)
+        self.assertIn("int people = -1", source)
+        for index in range(16):
+            self.assertRegex(source, rf"features\s*\[\s*{index}\s*\]")
+        feature_positions = [source.index(f"features[{index}]") for index in range(16)]
+        self.assertEqual(feature_positions, sorted(feature_positions))
+        self.assertIn("safety.updatePeople(predictedPeople, nowMs)", source)
+
+    def test_main_sketch_boots_outputs_then_ap_channel_then_espnow_then_web(self):
+        source = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        setup_body = source.split("void setup()", 1)[1].split("void loop()", 1)[0]
+        ordered = (
+            "Serial.begin", "motor.begin()", "encoder.begin()", "setupLoadCells()",
+            "WiFi.mode(WIFI_AP_STA)", "WiFi.softAP", "helmetReceiver.begin", "web.begin()",
+        )
+        positions = [setup_body.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("WiFi.softAP(AP_SSID, AP_PASSWORD, WIFI_CHANNEL)", setup_body)
+
+    def test_main_sketch_uses_callback_mailbox_and_nonblocking_loop_services(self):
+        source = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        callback_match = re.search(
+            r"void queueHelmetUpdate\s*\(bool worn, uint32_t nowMs\)\s*\{(?P<body>.*?)\n\}",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(callback_match)
+        callback = callback_match.group("body")
+        for token in (
+            "portENTER_CRITICAL", "pendingHelmetWorn", "pendingHelmetNowMs",
+            "pendingHelmetUpdate = true", "portEXIT_CRITICAL",
+        ):
+            self.assertIn(token, callback)
+        self.assertNotIn("safety.noteHelmet", callback)
+        self.assertNotIn("motor.", callback)
+        self.assertNotIn("web.", callback)
+        loop_body = source.split("void loop()", 1)[1]
+        for token in (
+            "web.handleClient()", "consumeHelmetMailbox()", "encoder.tick(nowMs)",
+            "safety.evaluate", "motor.tick(nowMs, safetySnapshot, encoder.rpm())",
+            "updateDashboardSnapshot(safetySnapshot)",
+        ):
+            self.assertIn(token, loop_body)
+        self.assertNotIn("delay(", loop_body)
+        self.assertIn("nowMs - lastDataMs >= DATA_INTERVAL", loop_body)
+
+    def test_main_sketch_calibration_lock_and_dashboard_mapping_are_firmware_owned(self):
+        source = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        self.assertIn("encoder.isCalibrated() && !encoder.isCalibrating()", source)
+        self.assertIn("motor.faultReason()", source)
+        for field in (
+            "dashboardSnapshot.lc1 =", "dashboardSnapshot.lc2 =", "dashboardSnapshot.lc3 =", "dashboardSnapshot.lc4 =",
+            "dashboardSnapshot.x =", "dashboardSnapshot.y =", "dashboardSnapshot.people =", "dashboardSnapshot.helmet =",
+            "dashboardSnapshot.motorAllowed = safetySnapshot.ready", "dashboardSnapshot.lockReason = safetySnapshot.lockReason",
+            "dashboardSnapshot.motorState = motorStateName(motor.state())", "dashboardSnapshot.targetRpm = motor.targetRpm()",
+            "dashboardSnapshot.actualRpm = encoder.rpm()", "dashboardSnapshot.pwmPercent = motor.pwmPercent()",
+            "dashboardSnapshot.encoderCalibrated = encoder.isCalibrated()", "dashboardSnapshot.pulsesPerRev = encoder.pulsesPerRevolution()",
+            "dashboardSnapshot.fault = dashboardFault()",
+        ):
+            self.assertIn(field, source)
+
+    def test_main_sketch_debounces_runtime_load_readiness_before_history_or_score(self):
+        source = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        if "bool updateLoadIfReady" not in source:
+            self.fail("runtime HX711 readiness helper must report failure")
+        update_body = source.split("bool updateLoadIfReady", 1)[1].split(
+            "void appendHistory", 1
+        )[0]
+        for token in (
+            "HX711_READY_TIMEOUT_MS = 500", "uint32_t* lastReadyMs", "nowMs - *lastReadyMs",
+            "if (!cell.is_ready())", "latchLoadSubsystemFault", "return !loadSubsystemFault",
+        ):
+            self.assertIn(token, source + update_body)
+        self.assertIn("nowMs - *lastReadyMs >= HX711_READY_TIMEOUT_MS", update_body)
+        sample_body = source.split("void sampleLoadCellsAndClassifier", 1)[1].split(
+            "void queueHelmetUpdate", 1
+        )[0]
+        readiness_failure = "!updateLoadIfReady(loadCell1, &currentWeights[0], &lastLoadReadyMs[0], nowMs)"
+        self.assertIn(readiness_failure, sample_body)
+        self.assertLess(sample_body.index(readiness_failure), sample_body.index("appendHistory(currentWeights)"))
+        self.assertLess(sample_body.index(readiness_failure), sample_body.index("classifyWindow(nowMs)"))
+        self.assertIn("lastLoadReadyMs[4]", source)
+        self.assertRegex(source, r"safety\.updatePeople\(\s*-1\s*,")
+
+    def test_main_sketch_uses_bounded_manual_tare_without_hx711_tare_call(self):
+        source = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        if "bool tareLoadCellBounded" not in source:
+            self.fail("load-cell tare must be explicitly bounded")
+        tare_body = source.split("bool tareLoadCellBounded", 1)[1].split(
+            "bool initializeLoadCell", 1
+        )[0]
+        for token in (
+            "TARE_TIMEOUT_MS", "TARE_REQUIRED_SAMPLES", "millis() - startedMs < TARE_TIMEOUT_MS",
+            "cell.is_ready()", "cell.read()", "cell.set_offset(", "samples < TARE_REQUIRED_SAMPLES",
+        ):
+            self.assertIn(token, tare_body)
+        self.assertNotIn("cell.tare()", source)
+
+    def test_web_interface_uses_portable_numeric_http_statuses(self):
+        source = (ROOT / "BalanceController/WebInterface.cpp").read_text(encoding="utf-8")
+        for token in (
+            "constexpr int HTTP_STATUS_OK = 200;",
+            "constexpr int HTTP_STATUS_BAD_REQUEST = 400;",
+            "constexpr int HTTP_STATUS_CONFLICT = 409;",
+        ):
+            self.assertIn(token, source)
+
+    def test_main_sketch_uses_production_feature_helper_with_compile_time_golden_checks(self):
+        main = (ROOT / "BalanceController/BalanceController.ino").read_text(encoding="utf-8")
+        helper = (ROOT / "BalanceController/LoadFeatureModel.h").read_text(encoding="utf-8")
+        self.assertIn('#include "LoadFeatureModel.h"', main)
+        self.assertIn("LoadFeatureModel::calculateWindow", main)
+        for token in (
+            "static_assert", "SIGNED_LOW_GOLDEN", "NEGATIVE_DENOMINATOR_GOLDEN",
+            "VARYING_SIGNED_GOLDEN", "280.0", "700.0", "FEATURE_EPSILON", "values[15]",
+        ):
+            self.assertIn(token, helper)
+        for golden_features in ("SIGNED_LOW_GOLDEN_FEATURES", "VARYING_SIGNED_GOLDEN_FEATURES"):
+            for index in range(16):
+                self.assertIn(f"{golden_features}.values[{index}]", helper)
+        self.assertRegex(helper, r"NEGATIVE_DENOMINATOR_GOLDEN_FEATURES\.values\[10\]")
+        self.assertRegex(helper, r"NEGATIVE_DENOMINATOR_GOLDEN_FEATURES\.values\[12\]")
+        self.assertIn('"cx mean"', helper)
+        self.assertIn('"cy mean"', helper)
+        self.assertIn('"varying cx std is nonzero"', helper)
+
+    def test_production_feature_header_compiles_varying_golden_and_sqrt_against_real_values(self):
+        compiler = esp32_cpp14_compiler()
+        sqrt_inputs = (1e-12, 1e-6, 0.25, 1.0, 2.0, 4.0, 1e6, 64e12, 1e18)
+        sqrt_assertions = "\n".join(
+            "static_assert(LoadFeatureModel::approximatelyEqual("
+            f"LoadFeatureModel::squareRoot({value:.17g}), {math.sqrt(value):.17g}, "
+            f"{max(1e-15, math.sqrt(value) * 1e-12):.17g}), \"sqrt {value:.17g}\");"
+            for value in sqrt_inputs
+        )
+        source = f'''#include "BalanceController/LoadFeatureModel.h"
+constexpr LoadFeatureModel::FeatureVector varying =
+    LoadFeatureModel::calculateWindow(LoadFeatureModel::VARYING_SIGNED_GOLDEN, 0);
+static_assert(LoadFeatureModel::approximatelyEqual(varying.values[1], 15000000.0, 1e-3),
+              "varying total std");
+static_assert(LoadFeatureModel::approximatelyEqual(varying.values[3], 8000000.0, 1e-3),
+              "varying w1 std");
+static_assert(LoadFeatureModel::approximatelyEqual(varying.values[11], 1.0, 1e-12),
+              "varying front rear correlation");
+{sqrt_assertions}
+int main() {{ return 0; }}
+'''
+        cxx11_source = '''#include "BalanceController/LoadFeatureModel.h"
+int main() {
+  return LoadFeatureModel::squareRoot(64000000000000.0) > 0.0 ? 0 : 1;
+}
+'''
+        for standard, compile_source in (("gnu++11", cxx11_source), ("gnu++14", source)):
+            with self.subTest(standard=standard):
+                result = subprocess.run(
+                    [str(compiler), f"-std={standard}", "-x", "c++", "-fsyntax-only", "-I", str(ROOT), "-"],
+                    input=compile_source,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

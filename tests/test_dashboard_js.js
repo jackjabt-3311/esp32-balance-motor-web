@@ -12,6 +12,8 @@ const script = html.slice(start, end);
 // The production change that should fail these checks is removing fail-safe
 // recovery or allowing a post-command refresh to reuse a stale poll.
 assert.doesNotThrow(() => new Function(script), "dashboard JavaScript must compile");
+assert.match(script, /clamp\(data\.x, -100, 100\)/, "COG X must consume the firmware's -100..100 scale");
+assert.match(script, /clamp\(data\.y, -100, 100\)/, "COG Y must consume the firmware's -100..100 scale");
 assert.match(script, /const DATA_TIMEOUT_MS = 1000;/, "data requests need a bounded timeout");
 assert.match(script, /new AbortController\(\)/, "data requests need an abort controller");
 assert.match(script, /signal: controller\.signal/, "fetch must receive the abort signal");
